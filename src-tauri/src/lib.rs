@@ -1,7 +1,7 @@
 mod db;
 mod config;
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 use std::sync::Mutex;
 use sqlx::{SqlitePool, FromRow};
 use serde::{Deserialize, Serialize};
@@ -54,8 +54,10 @@ pub struct FileEntry {
 pub struct Story {
     pub id: String,
     pub title: String,
+    pub description: Option<String>,
     pub status: String,
     pub ai_ready: i32,
+    pub ai_hold: i32,
     pub agent: Option<String>,
     pub state: Option<String>,
 }
@@ -68,7 +70,7 @@ async fn get_stories(state: tauri::State<'_, AppState>) -> Result<Vec<Story>, St
     };
 
     if let Some(pool) = pool {
-        let stories = sqlx::query_as::<_, Story>("SELECT id, title, status, ai_ready, agent, state FROM stories")
+        let stories = sqlx::query_as::<_, Story>("SELECT id, title, description, status, ai_ready, ai_hold, agent, state FROM stories")
             .fetch_all(&pool)
             .await
             .map_err(|e| format!("Database error: {}", e))?;
@@ -88,8 +90,8 @@ async fn create_story(title: String, state: tauri::State<'_, AppState>) -> Resul
     if let Some(pool) = pool {
         let id_suffix = uuid::Uuid::new_v4().to_string().chars().take(6).collect::<String>();
         let id = format!("S-{}", id_suffix.to_uppercase());
-        let status = "Backlog".to_string();
-        let ai_ready = 0;
+        let status = "Raw Requirements".to_string();
+        let ai_ready = 1; // Always ready for AI when in Raw Requirements
 
         sqlx::query("INSERT INTO stories (id, title, status, ai_ready) VALUES (?, ?, ?, ?)")
             .bind(&id)
@@ -103,8 +105,10 @@ async fn create_story(title: String, state: tauri::State<'_, AppState>) -> Resul
         Ok(Story {
             id,
             title,
+            description: None,
             status,
             ai_ready,
+            ai_hold: 0,
             agent: None,
             state: None,
         })
@@ -118,19 +122,56 @@ async fn update_story_status(id: String, status: String, state: tauri::State<'_,
     let pool = {
         let guard = state.db.lock().unwrap();
         guard.clone()
-    };
+    }.ok_or("Database not initialized")?;
 
-    if let Some(pool) = pool {
-        sqlx::query("UPDATE stories SET status = ? WHERE id = ?")
-            .bind(&status)
-            .bind(&id)
-            .execute(&pool)
-            .await
-            .map_err(|e| format!("Database error: {}", e))?;
-        Ok(())
-    } else {
-        Err("Database not initialized".to_string())
-    }
+    sqlx::query("UPDATE stories SET status = ? WHERE id = ?")
+        .bind(&status)
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn delete_story(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let pool = {
+        let guard = state.db.lock().unwrap();
+        guard.clone()
+    }.ok_or("Database not initialized")?;
+
+    sqlx::query("DELETE FROM stories WHERE id = ?")
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .map_err(|e| format!("Database error: {}", e))?;
+    
+    Ok(())
+}
+
+#[tauri::command]
+async fn toggle_story_hold(id: String, state: tauri::State<'_, AppState>) -> Result<i32, String> {
+    let pool = {
+        let guard = state.db.lock().unwrap();
+        guard.clone()
+    }.ok_or("Database not initialized")?;
+
+    let story: Story = sqlx::query_as("SELECT * FROM stories WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let new_hold = if story.ai_hold == 1 { 0 } else { 1 };
+
+    sqlx::query("UPDATE stories SET ai_hold = ? WHERE id = ?")
+        .bind(new_hold)
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    Ok(new_hold)
 }
 
 #[tauri::command]
@@ -172,6 +213,126 @@ async fn list_files(path: String) -> Result<Vec<FileEntry>, String> {
 #[tauri::command]
 async fn chat_with_agent(messages: Vec<Message>, app: tauri::AppHandle) -> Result<String, String> {
     call_llm(&app, messages).await
+}
+
+async fn read_file_internal(path: &str, state: &tauri::State<'_, AppState>) -> Result<String, String> {
+    let project_path = {
+        let guard = state.project_path.lock().unwrap();
+        guard.clone()
+    }.ok_or("No project connected")?;
+
+    let full_path = std::path::PathBuf::from(&project_path).join(path);
+    if !full_path.starts_with(&project_path) {
+        return Err("Access denied: Path outside project".to_string());
+    }
+
+    std::fs::read_to_string(full_path).map_err(|e| e.to_string())
+}
+
+async fn write_file_internal(path: &str, content: &str, state: &tauri::State<'_, AppState>) -> Result<(), String> {
+    let project_path = {
+        let guard = state.project_path.lock().unwrap();
+        guard.clone()
+    }.ok_or("No project connected")?;
+
+    let full_path = std::path::PathBuf::from(&project_path).join(path);
+    if !full_path.starts_with(&project_path) {
+        return Err("Access denied: Path outside project".to_string());
+    }
+
+    if let Some(parent) = full_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+
+    std::fs::write(full_path, content).map_err(|e| e.to_string())
+}
+
+async fn run_project_command_internal(command: &str, args: Vec<String>, state: &tauri::State<'_, AppState>) -> Result<String, String> {
+    let project_path = {
+        let guard = state.project_path.lock().unwrap();
+        guard.clone()
+    }.ok_or("No project connected")?;
+
+    let output = std::process::Command::new(command)
+        .args(args)
+        .current_dir(project_path)
+        .output()
+        .map_err(|e| e.to_string())?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if output.status.success() {
+        Ok(stdout)
+    } else {
+        Err(format!("Command failed: {}\n{}", stdout, stderr))
+    }
+}
+
+async fn search_code_internal(query: &str, state: &tauri::State<'_, AppState>) -> Result<String, String> {
+    let project_path = {
+        let guard = state.project_path.lock().unwrap();
+        guard.clone()
+    }.ok_or("No project connected")?;
+
+    let mut results = Vec::new();
+    let walker = WalkBuilder::new(&project_path).build();
+
+    for entry in walker {
+        if let Ok(entry) = entry {
+            if entry.path().is_file() {
+                if let Ok(content) = std::fs::read_to_string(entry.path()) {
+                    if content.contains(query) {
+                        let rel_path = entry.path().strip_prefix(&project_path).unwrap_or(entry.path());
+                        results.push(rel_path.to_string_lossy().into_owned());
+                        if results.len() > 10 { break; } // Cap results
+                    }
+                }
+            }
+        }
+    }
+    
+    if results.is_empty() {
+        Ok("No matches found".to_string())
+    } else {
+        Ok(format!("Matches found in:\n{}", results.join("\n")))
+    }
+}
+
+// Helper to parse <tool:NAME>ARGS</tool>
+fn parse_tool_call(response: &str) -> Option<(String, String)> {
+    if let Some(start_idx) = response.find("<tool:") {
+        let rest = &response[start_idx + 6..];
+        if let Some(end_name_idx) = rest.find('>') {
+            let tool_name = &rest[..end_name_idx];
+            let after_name = &rest[end_name_idx + 1..];
+            if let Some(end_tag_idx) = after_name.find("</tool>") {
+                let args = &after_name[..end_tag_idx];
+                return Some((tool_name.to_string(), args.to_string()));
+            }
+        }
+    }
+    None
+}
+
+#[tauri::command]
+async fn read_file(path: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    read_file_internal(&path, &state).await
+}
+
+#[tauri::command]
+async fn write_file(path: String, content: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    write_file_internal(&path, &content, &state).await
+}
+
+#[tauri::command]
+async fn run_project_command(command: String, args: Vec<String>, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    run_project_command_internal(&command, args, &state).await
+}
+
+#[tauri::command]
+async fn search_code(query: String, state: tauri::State<'_, AppState>) -> Result<String, String> {
+    search_code_internal(&query, &state).await
 }
 
 #[tauri::command]
@@ -242,7 +403,8 @@ async fn start_indexing(app: tauri::AppHandle, state: tauri::State<'_, AppState>
 }
 
 #[tauri::command]
-async fn dispatch_agent(id: String, app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+async fn dispatch_agent(id: String, additional_context: Option<String>, app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    println!("[Agent] Dispatching story: {} with context: {:?}", id, additional_context);
     let pool = {
         let guard = state.db.lock().unwrap();
         guard.clone()
@@ -258,18 +420,78 @@ async fn dispatch_agent(id: String, app: tauri::AppHandle, state: tauri::State<'
     let _ = app.emit("log", format!("\x1b[33m[Agent]\x1b[0m Dispatching Builder to story: {}", id));
 
     // 2. Fetch the story
-    let story: Story = sqlx::query_as("SELECT id, title, status, ai_ready, agent, state FROM stories WHERE id = ?")
+    let story: Story = sqlx::query_as("SELECT id, title, description, status, ai_ready, ai_hold, agent, state FROM stories WHERE id = ?")
         .bind(&id)
         .fetch_one(&pool)
         .await
         .map_err(|e| e.to_string())?;
 
     // 3. Simple static context for now (RAG indexing was already set up in background)
-    let system_prompt = "You are Sandman, an autonomous IDE agent. You must analyze the requirements and provide a high-level implementation strategy. For now, just summarize the task and confirm receipt.";
-    let user_msg = format!("Task: {}\nPlease analyze this story and confirm readiness.", story.title);
+    let (system_prompt, mut user_msg) = if story.status == "Raw Requirements" || story.status == "Clarification Required" {
+        let prompt = "You are Sandman, a senior product owner and software architect. Your job is to take raw requirements from a user and polish them into a professional, Jira-style user story.
 
-    let messages = vec![
-        Message { role: "system".to_string(), content: system_prompt.to_string() },
+The output MUST follow this format:
+# Title: [Polished Story Title]
+# Description: [Clear, detailed description of the feature or task]
+# Acceptance Criteria:
+- [Criteria 1]
+- [Criteria 2]
+...
+
+If the requirements are still too vague after reviewing user answers, you may append a 'Clarifying Questions' section at the end. If you have clarifying questions, MOVE the story to 'Clarification Required'. 
+
+CRITICAL: If the user has provided 'ADDITIONAL CONTEXT FROM USER' below, you MUST integrate those answers into a FINAL story. DO NOT repeat the same questions if the user has provided answers for them. Finalize the story into 'To-Do' if the context is sufficient.";
+        
+        let msg = if additional_context.is_some() {
+            format!("Raw Requirement: {}", story.title)
+        } else {
+            format!("Raw Requirement: {}\n\n{}", story.title, story.description.as_deref().unwrap_or(""))
+        };
+        (prompt.to_string(), msg)
+    } else if story.status == "To Do" {
+        let prompt = "You are Sandman, a senior software architect. Analyze this story and provide a high-level implementation strategy. Identify key files to modify and the overall architecture.";
+        let msg = format!("Story Title: {}\nDescription: {}", story.title, story.description.as_deref().unwrap_or(""));
+        (prompt.to_string(), msg)
+    } else if story.status == "In Progress" {
+        let prompt = "You are Sandman Builder, a technology-agnostic engineering agent. 
+You can implement any application (Web, Mobile, System, AI, etc.) by discovering the project's tech stack first.
+
+AVAILABLE TOOLS:
+- <tool:read_file>path</tool>
+- <tool:write_file>path | content</tool>
+- <tool:run_command>command args</tool> (use this to build/test or install deps)
+- <tool:search_code>keyword</tool> (use this to find relevant files and understand existing code)
+
+STRATEGY:
+1. Scan for config files (package.json, go.mod, etc.) to understand the environment.
+2. Develop the implementation plan.
+3. Write the code and verify it.
+
+STORY: {TITLE}\nDESCRIPTION: {DESC}";
+        let msg = prompt
+            .replace("{TITLE}", &story.title)
+            .replace("{DESC}", story.description.as_deref().unwrap_or(""));
+        (prompt.to_string(), msg)
+    } else if story.status == "Review" {
+        let prompt = "You are Sandman Reviewer. Analyze the code changes using <tool:read_file> or <tool:search_code> to verify quality and correctness for the target technology stack.
+Story Title: {TITLE}
+Description: {DESC}";
+        let msg = prompt
+            .replace("{TITLE}", &story.title)
+            .replace("{DESC}", story.description.as_deref().unwrap_or(""));
+        (prompt.to_string(), msg)
+    } else {
+        let prompt = "You are Sandman, an autonomous IDE agent. You must analyze the requirements and provide a high-level implementation strategy. For now, just summarize the task and confirm receipt.";
+        let msg = format!("Task: {}\nPlease analyze this story and confirm readiness.", story.title);
+        (prompt.to_string(), msg)
+    };
+
+    if let Some(ctx) = additional_context {
+        user_msg = format!("{}\n\nADDITIONAL CONTEXT FROM USER:\n{}", user_msg, ctx);
+    }
+    
+    let mut conversation = vec![
+        Message { role: "system".to_string(), content: system_prompt },
         Message { role: "user".to_string(), content: user_msg },
     ];
 
@@ -278,35 +500,120 @@ async fn dispatch_agent(id: String, app: tauri::AppHandle, state: tauri::State<'
     let pool_clone = pool.clone();
 
     tauri::async_runtime::spawn(async move {
-        match call_llm(&app_clone, messages).await {
-            Ok(response) => {
-                let _ = app_clone.emit("log", format!("\x1b[32m[Agent]\x1b[0m AI Proposal received: \n{}", response));
-                let _ = sqlx::query("UPDATE stories SET state = 'success' WHERE id = ?")
-                    .bind(&id_clone)
-                    .execute(&pool_clone)
-                    .await;
+        // Recover state inside the spawned task to avoid lifetime issues
+        let state = app_clone.state::<AppState>();
+        
+        let mut loop_count = 0;
+        let max_loops = 10;
+        let mut final_response = String::new();
+
+        while loop_count < max_loops {
+            match call_llm(&app_clone, conversation.clone()).await {
+                Ok(response) => {
+                    final_response = response.clone();
+                    
+                    if let Some((tool_name, args)) = parse_tool_call(&response) {
+                        let _ = app_clone.emit("log", format!("\x1b[35m[Agent]\x1b[0m Executing {}: {}", tool_name, args.chars().take(50).collect::<String>()));
+                        
+                        let result = match tool_name.as_str() {
+                            "read_file" => read_file_internal(args.trim(), &state).await,
+                            "write_file" => {
+                                let parts: Vec<&str> = args.splitn(2, '|').collect();
+                                if parts.len() == 2 {
+                                    write_file_internal(parts[0].trim(), parts[1].trim(), &state).await
+                                        .map(|_| "Success: File written".to_string())
+                                } else {
+                                    Err("Format error: use 'path | content'".to_string())
+                                }
+                            },
+                            "run_command" => {
+                                let parts: Vec<&str> = args.split_whitespace().collect();
+                                if !parts.is_empty() {
+                                    run_project_command_internal(parts[0], parts[1..].iter().map(|s| s.to_string()).collect(), &state).await
+                                } else {
+                                    Err("Empty command".to_string())
+                                }
+                            },
+                            "search_code" => search_code_internal(args.trim(), &state).await,
+                            _ => Err("Unknown tool".to_string()),
+                        };
+
+                        let tool_msg = match result {
+                            Ok(r) => format!("TOOL_RESULT: {}", r),
+                            Err(e) => format!("TOOL_ERROR: {}", e),
+                        };
+
+                        conversation.push(Message { role: "assistant".to_string(), content: response });
+                        conversation.push(Message { role: "user".to_string(), content: tool_msg });
+                        loop_count += 1;
+                    } else {
+                        break;
+                    }
+                },
+                Err(e) => {
+                    let _ = app_clone.emit("log", format!("\x1b[31m[Agent]\x1b[0m AI Error: {}", e));
+                    let _ = sqlx::query("UPDATE stories SET state = 'failed' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
+                    return;
+                }
             }
-            Err(e) => {
-                let _ = app_clone.emit("log", format!("\x1b[31m[Agent]\x1b[0m Agent crash: {}", e));
-                let _ = sqlx::query("UPDATE stories SET state = 'failed' WHERE id = ?")
-                    .bind(&id_clone)
-                    .execute(&pool_clone)
-                    .await;
-            }
+        }
+
+        // Finalize story based on context
+        let response = final_response;
+        let _ = app_clone.emit("log", format!("\x1b[32m[Agent]\x1b[0m Task completed: {}", id_clone));
+        
+        if story.status == "Raw Requirements" || story.status == "Clarification Required" {
+            let new_title = response.lines()
+                .find(|l| l.contains("Title:"))
+                .map(|l| l.replace("# Title:", "").trim().to_string())
+                .unwrap_or(story.title.clone());
+            
+            let has_questions = response.to_lowercase().contains("clarifying questions") 
+                && response.lines()
+                    .skip_while(|l| !l.to_lowercase().contains("clarifying questions"))
+                    .skip(1)
+                    .any(|l| !l.trim().is_empty());
+
+            let next_status = if has_questions { "Clarification Required" } else { "To Do" };
+
+            let _ = sqlx::query("UPDATE stories SET title = ?, description = ?, status = ?, state = 'success', ai_ready = ? WHERE id = ?")
+                .bind(&new_title).bind(&response).bind(next_status).bind(1).bind(&id_clone).execute(&pool_clone).await;
+        } else if story.status == "To Do" {
+            let _ = sqlx::query("UPDATE stories SET status = 'In Progress', agent = 'Builder', state = 'success' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
+        } else if story.status == "In Progress" {
+            let _ = sqlx::query("UPDATE stories SET status = 'Review', agent = 'Reviewer', state = 'success' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
+        } else if story.status == "Review" {
+            let _ = sqlx::query("UPDATE stories SET status = 'Done', agent = NULL, state = 'success' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
+        } else {
+            let _ = sqlx::query("UPDATE stories SET state = 'success' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
         }
     });
 
     Ok(())
 }
 
+fn setup_project_structure(path: &str) {
+    let folders = ["src", "docs", "tests", ".sandman"];
+    for folder in folders {
+        let mut p = std::path::PathBuf::from(path);
+        p.push(folder);
+        if !p.exists() {
+            let _ = std::fs::create_dir_all(&p);
+        }
+    }
+}
+
 #[tauri::command]
 async fn switch_project(path: String, app: tauri::AppHandle, state: tauri::State<'_, AppState>) -> Result<String, String> {
     println!("Switched active project to: {}", path);
-    
-    // Connect to SQLite db and embed in .sandman/
+    *state.project_path.lock().unwrap() = Some(path.clone());
+
+    // 1. Setup standard project structure
+    setup_project_structure(&path);
+
+    // 2. Connect to SQLite db and embed in .sandman/
     let pool = db::init_db(&path).await?;
     *state.db.lock().unwrap() = Some(pool.clone());
-    *state.project_path.lock().unwrap() = Some(path.clone());
 
     // Emit connection logs
     let _ = app.emit("log", format!("\x1b[36m[System]\x1b[0m Switched active project to: {}", path));
@@ -330,7 +637,13 @@ pub fn run() {
             get_stories,
             create_story,
             update_story_status,
+            delete_story,
+            toggle_story_hold,
             list_files,
+            read_file,
+            write_file,
+            run_project_command,
+            search_code,
             get_config,
             save_global_config,
             update_provider,

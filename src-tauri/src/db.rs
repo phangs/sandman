@@ -30,6 +30,7 @@ pub async fn init_db(project_path: &str) -> Result<SqlitePool, String> {
         CREATE TABLE IF NOT EXISTS stories (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
+            description TEXT,
             status TEXT NOT NULL,
             ai_ready INTEGER NOT NULL DEFAULT 0,
             agent TEXT,
@@ -56,6 +57,10 @@ pub async fn init_db(project_path: &str) -> Result<SqlitePool, String> {
         .execute(&pool)
         .await
         .map_err(|e| format!("Failed to initialize core schema: {}", e))?;
+
+    // Quick migration for description and ai_hold columns
+    let _ = sqlx::query("ALTER TABLE stories ADD COLUMN description TEXT").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE stories ADD COLUMN ai_hold INTEGER DEFAULT 0").execute(&pool).await;
 
     // 2. Vector table (Requires sqlite-vec extension)
     // We attempt this separately so the app doesn't crash if the extension isn't loaded
