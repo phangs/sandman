@@ -843,21 +843,23 @@ async fn dispatch_agent(id: String, additional_context: Option<String>, app: tau
         guard.clone()
     }.ok_or("No project connected")?;
 
-    // 1. Mark as processing
-    sqlx::query("UPDATE stories SET state = 'processing', agent = 'Builder' WHERE id = ?")
-        .bind(&id)
-        .execute(&pool)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let _ = app.emit("log", format!("\x1b[33m[Agent]\x1b[0m Dispatching Builder to story: {}", id));
-
-    // 2. Fetch the story
+    // 1. Fetch the story
     let story: Story = sqlx::query_as("SELECT id, title, description, status, ai_ready, ai_hold, agent, state, reviewer_feedback, skip_clarification FROM stories WHERE id = ?")
         .bind(&id)
         .fetch_one(&pool)
         .await
         .map_err(|e| e.to_string())?;
+
+    // 2. Mark as processing
+    let agent_name = if story.status == "Documentation" { "Writer" } else { "Builder" };
+    sqlx::query("UPDATE stories SET state = 'processing', agent = ? WHERE id = ?")
+        .bind(agent_name)
+        .bind(&id)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let _ = app.emit("log", format!("\x1b[33m[Agent]\x1b[0m Dispatching {} to story: {}", agent_name, id));
 
     // 3. Automated Context Discovery: Give the agent 'eyes' on the filesystem immediately
     let project_path = {
@@ -895,6 +897,10 @@ async fn dispatch_agent(id: String, additional_context: Option<String>, app: tau
     let (system_prompt, mut user_msg) = if story.status == "Raw Requirements" || story.status == "Clarification Required" {
         let prompt = "You are Sandman, a senior product owner and software architect. Your job is to take raw requirements from a user and polish them into a professional, Jira-style user story.
 
+DOCUMENTATION RESPONSIBILITIES:
+- You MUST maintain 'docs/PRD.md' (Project Requirements Document) and 'docs/FEATURES.md' (High-level feature list).
+- For every new requirement, you must ensure these files are updated or created using <tool:write_file> BEFORE finalizing the story.
+
 The output MUST follow this format:
 # Title: [Polished Story Title]
 # Description: [Clear, detailed description of the feature or task]
@@ -924,10 +930,11 @@ If the user has provided 'ADDITIONAL CONTEXT FROM USER' below, you MUST integrat
         let prompt = "You are Sandman Tester (Test Lead). Your role is to prepare the verification suite before implementation begins.
 YOU MUST:
 1. READ the story description and Acceptance Criteria.
-2. Identify the target project language and testing framework (e.g., Vitest for React, Cargo for Rust).
-3. Use <tool:write_file> to create detailed test scripts in the project's 'tests/' or equivalent directory that map 1:1 to the Acceptance Criteria.
-4. Once the test stubs/scripts are created, summarize the test plan and MOVE the story to 'To-Do' so the Architect can begin planning.
-5. IF SYSTEM SETUP IS MISSING: Add a '**MANUAL INTERVENTION REQUIRED**' section with 'npm install' or 'cargo build'.
+2. Identify the target project language and testing framework.
+3. Use <tool:write_file> to create detailed test scripts in the project's 'tests/' or equivalent directory.
+4. MAINTAIN 'docs/TESTING.md': Document how to run the tests you created.
+5. Once the test stubs/scripts are created, summarize the test plan and MOVE the story to 'To-Do' so the Architect can begin planning.
+6. IF SYSTEM SETUP IS MISSING: Add a '**MANUAL INTERVENTION REQUIRED**' section with 'npm install' or 'cargo build'.
 
 STORY: {TITLE}
 DESCRIPTION: {DESC}";
@@ -940,14 +947,20 @@ DESCRIPTION: {DESC}";
         let prompt = "You are Sandman Architect. Analyze the story and generate a formal implementation plan.
 
 AVAILABLE TOOLS:
-- <tool:create_task>title</tool> (use this to create a checklist on the story board)
+- <tool:create_task>title</tool>
 - <tool:write_file>path | content</tool>
+
+DOCUMENTATION RESPONSIBLITIES:
+- You MUST maintain 'docs/ARCH.md' (Overall architecture overview).
+- You MUST maintain 'docs/DEPLOY.md' (Deployment guide, Docker, CI/CD).
+- You MUST update 'README.md' at the project root to reflect current features.
+- You MUST create 'docs/{ID}_PLAN.md' with the high-level architecture and task breakdown for THIS specific story.
 
 YOU MUST:
 1. READ the story's '# Tasks' section carefully.
 2. Register EVERY identified task into the story checklist using <tool:create_task>.
-3. Use <tool:write_file> to create 'docs/{ID}_PLAN.md' with the high-level architecture and task breakdown.
-4. Only after creating the plan, confirm that the story is ready for implementation.
+3. Update all documentation files mentioned above BEFORE moving the story to 'In Progress'.
+4. Confirm that the implementation plan is ready and the documentation is up to date.
 
 STORY: {TITLE}
 DESCRIPTION: {DESC}";
@@ -1018,7 +1031,7 @@ DESCRIPTION: {DESC}";
 AVAILABLE TOOLS:
 - <tool:run_command> (Use this to verify tests, build, or start the app)
 - <tool:read_file> (Use this to audit the code)
-- <tool:update_story> 'Done | [Success Summary]' OR 'In Progress | [Reason for rejection]'
+- <tool:update_story> 'Documentation | [Success Summary]' OR 'In Progress | [Reason for rejection]'
 
 YOU MUST:
 1. READ 'docs/{ID}_PLAN.md' and compare it with the actual project files.
@@ -1026,7 +1039,29 @@ YOU MUST:
 CRITICAL: DO NOT run persistent servers (npm run dev). Commands MUST terminate quickly.
 3. IF YOU SEE COMPILATION OR IMPORT ERRORS (like 'Failed to resolve import' or 'File not found'): You MUST reject the implementation and move the story back to 'In Progress'.
 4. Provide the exact error log in your feedback.
-5. ONLY move to 'Done' if the build SUCCEEDS with no errors.
+5. ONLY move to 'Documentation' if the build SUCCEEDS with no errors.
+
+STORY: {TITLE}
+DESCRIPTION: {DESC}";
+        let msg = prompt
+            .replace("{ID}", &story.id)
+            .replace("{TITLE}", &story.title)
+            .replace("{DESC}", story.description.as_deref().unwrap_or(""));
+        (prompt.to_string(), msg)
+    } else if story.status == "Documentation" {
+        let prompt = "You are Sandman Technical Writer. Your mission is to ensure the project has high-fidelity documentation.
+        
+AVAILABLE TOOLS:
+- <tool:read_file> (Read project files to understand the final implementation)
+- <tool:write_file> (Maintain the docs/ folder)
+- <tool:update_story> 'Done | [Documentation Summary]'
+
+YOU MUST:
+1. READ the code and the original 'docs/{ID}_PLAN.md'.
+2. MAINTAIN 'docs/USER_GUIDE.md': Add or update instructions for this specific feature.
+3. MAINTAIN 'docs/CHANGELOG.md': Append a professional entry describing what was added/fixed.
+4. ENSURE the project 'README.md' at the root is clean and reflects the total feature set.
+5. Once your documentation polish is complete, move the story to 'Done'.
 
 STORY: {TITLE}
 DESCRIPTION: {DESC}";

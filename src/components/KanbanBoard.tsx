@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Bot, Play, CheckCircle, CircleDashed, AlertOctagon, TerminalSquare, Plus, Trash2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
-type StoryStatus = 'Raw Requirements' | 'Clarification Required' | 'Backlog' | 'To Do' | 'In Progress' | 'Review' | 'Testing' | 'Done';
+type StoryStatus = 'Raw Requirements' | 'Clarification Required' | 'Backlog' | 'To Do' | 'In Progress' | 'Review' | 'Testing' | 'Documentation' | 'Done';
 
 interface Story {
   id: string;
@@ -13,11 +13,11 @@ interface Story {
   ai_ready: number;
   ai_hold: number;
   skip_clarification: number;
-  agent?: 'Story' | 'Builder' | 'Reviewer' | 'Tester';
+  agent?: 'Story' | 'Builder' | 'Reviewer' | 'Tester' | 'Writer';
   state?: 'idle' | 'processing' | 'failed' | 'success';
 }
 
-const COLUMNS: StoryStatus[] = ['Raw Requirements', 'Clarification Required', 'Backlog', 'To Do', 'In Progress', 'Review', 'Testing', 'Done'];
+const COLUMNS: StoryStatus[] = ['Raw Requirements', 'Clarification Required', 'Backlog', 'To Do', 'In Progress', 'Review', 'Testing', 'Documentation', 'Done'];
 
 export function KanbanBoard() {
   const [stories, setStories] = useState<Story[]>([]);
