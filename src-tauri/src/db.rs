@@ -61,6 +61,7 @@ pub async fn init_db(project_path: &str) -> Result<SqlitePool, String> {
     // Quick migration for description and ai_hold columns
     let _ = sqlx::query("ALTER TABLE stories ADD COLUMN description TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE stories ADD COLUMN ai_hold INTEGER DEFAULT 0").execute(&pool).await;
+    let _ = sqlx::query("ALTER TABLE stories ADD COLUMN reviewer_feedback TEXT").execute(&pool).await;
 
     // AI Progress Tracking
     let _ = sqlx::query("CREATE TABLE IF NOT EXISTS story_tasks (

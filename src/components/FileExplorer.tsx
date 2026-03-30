@@ -9,7 +9,7 @@ interface FileEntry {
   children?: FileEntry[];
 }
 
-export function FileExplorer({ rootPath }: { rootPath: string }) {
+export function FileExplorer({ rootPath, onFileClick }: { rootPath: string; onFileClick: (path: string) => void }) {
   const [entries, setEntries] = useState<FileEntry[]>([]);
 
   useEffect(() => {
@@ -30,17 +30,17 @@ export function FileExplorer({ rootPath }: { rootPath: string }) {
   return (
     <div className="flex-1 flex flex-col overflow-y-auto px-2 py-1 select-none">
       {entries.map((entry) => (
-        <FileItem key={entry.path} entry={entry} depth={0} />
+        <FileItem key={entry.path} entry={entry} depth={0} onFileClick={onFileClick} />
       ))}
     </div>
   );
 }
 
-function FileItem({ entry, depth }: { entry: FileEntry; depth: number }) {
+function FileItem({ entry, depth, onFileClick }: { entry: FileEntry; depth: number; onFileClick: (path: string) => void }) {
   const [isOpen, setIsOpen] = useState(false);
   const [children, setChildren] = useState<FileEntry[]>([]);
 
-  const toggle = async () => {
+  const handleClick = async () => {
     if (entry.is_dir) {
       if (!isOpen && children.length === 0) {
         try {
@@ -51,13 +51,15 @@ function FileItem({ entry, depth }: { entry: FileEntry; depth: number }) {
         }
       }
       setIsOpen(!isOpen);
+    } else {
+      onFileClick(entry.path);
     }
   };
 
   return (
     <div className="flex flex-col">
       <div 
-        onClick={toggle}
+        onClick={handleClick}
         className="flex items-center gap-2 px-2 py-0.5 rounded hover:bg-white/5 cursor-pointer text-text text-xs"
         style={{ paddingLeft: `${depth * 12 + 8}px` }}
       >
@@ -75,7 +77,7 @@ function FileItem({ entry, depth }: { entry: FileEntry; depth: number }) {
       {isOpen && entry.is_dir && children.length > 0 && (
         <div className="flex flex-col">
           {children.map((child) => (
-            <FileItem key={child.path} entry={child} depth={depth + 1} />
+            <FileItem key={child.path} entry={child} depth={depth + 1} onFileClick={onFileClick} />
           ))}
         </div>
       )}

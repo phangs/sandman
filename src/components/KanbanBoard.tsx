@@ -1,87 +1,49 @@
 import React, { useState, useEffect } from 'react';
-import { Bot, Play, CheckCircle, CircleDashed, AlertOctagon, TerminalSquare, Plus, CornerDownLeft, Trash2 } from 'lucide-react';
+import { Bot, Play, CheckCircle, CircleDashed, AlertOctagon, TerminalSquare, Plus, Trash2 } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 
-type StoryStatus = 'Raw Requirements' | 'Clarification Required' | 'Backlog' | 'To Do' | 'In Progress' | 'Review' | 'Done';
+type StoryStatus = 'Raw Requirements' | 'Clarification Required' | 'Backlog' | 'To Do' | 'In Progress' | 'Review' | 'Testing' | 'Done';
 
 interface Story {
   id: string;
   title: string;
   description?: string;
+  reviewer_feedback?: string;
   status: StoryStatus;
   ai_ready: number;
   ai_hold: number;
-  agent?: 'Story' | 'Builder' | 'Reviewer';
+  skip_clarification: number;
+  agent?: 'Story' | 'Builder' | 'Reviewer' | 'Tester';
   state?: 'idle' | 'processing' | 'failed' | 'success';
 }
 
-const COLUMNS: StoryStatus[] = ['Raw Requirements', 'Clarification Required', 'Backlog', 'To Do', 'In Progress', 'Review', 'Done'];
+const COLUMNS: StoryStatus[] = ['Raw Requirements', 'Clarification Required', 'Backlog', 'To Do', 'In Progress', 'Review', 'Testing', 'Done'];
 
 export function KanbanBoard() {
   const [stories, setStories] = useState<Story[]>([]);
   const [draggingId, setDraggingId] = useState<string | null>(null);
   const [isAdding, setIsAdding] = useState(false);
   const [newTitle, setNewTitle] = useState('');
+  const [skipClarification, setSkipClarification] = useState(false);
   const [activeModalStory, setActiveModalStory] = useState<Story | null>(null);
   const [answers, setAnswers] = useState<Record<string, string>>({});
-  const [activeAIColumns, setActiveAIColumns] = useState<Set<StoryStatus>>(new Set(['Raw Requirements', 'Clarification Required', 'To Do', 'In Progress', 'Review']));
+  const [activeAIColumns, setActiveAIColumns] = useState<Set<StoryStatus>>(new Set(['Raw Requirements', 'Clarification Required', 'Backlog', 'To Do', 'In Progress', 'Review', 'Testing']));
 
-  const questions = activeModalStory?.description 
-    ? activeModalStory.description
+  const modalStory = activeModalStory ? stories.find(s => s.id === activeModalStory.id) || activeModalStory : null;
+
+  const questions = modalStory?.description 
+    ? modalStory.description
         .split(/Clarifying Questions:?/i)[1]
         ?.split('\n')
         .filter(l => l.trim().match(/^[-*•?]|^\d+\./))
         .map(l => l.trim())
     : [];
 
-  const [config, setConfig] = useState<any>(null);
-  const [storyTasks, setStoryTasks] = useState<Record<string, any[]>>({});
-
-  const loadConfig = async () => {
-    try {
-      const c = await invoke('get_config');
-      setConfig(c);
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
-  const fetchStoryTasks = async (ids: string[]) => {
-    const results: Record<string, any[]> = {};
-    await Promise.all(
-      ids.map(async (id) => {
-        try {
-          const tasks = await invoke<any[]>('get_story_tasks', { storyId: id });
-          results[id] = tasks;
-        } catch { results[id] = []; }
-      })
-    );
-    setStoryTasks(prev => ({ ...prev, ...results }));
-  };
-
-  const handleSetColumnStrategy = async (status: StoryStatus, providerId: string) => {
-    try {
-      await invoke('set_column_strategy', { status, providerId });
-      loadConfig();
-    } catch (err) {
-      console.error(err);
-    }
-  };
-
   useEffect(() => {
-    loadConfig();
     fetchStories();
     const storyInterval = setInterval(fetchStories, 3000);
     return () => clearInterval(storyInterval);
   }, []);
-
-  // Poll tasks for all stories in active SDLC stages
-  useEffect(() => {
-    const activeIds = stories
-      .filter(s => ['To Do', 'In Progress', 'Review'].includes(s.status))
-      .map(s => s.id);
-    if (activeIds.length > 0) fetchStoryTasks(activeIds);
-  }, [stories]);
 
   const fetchStories = async () => {
     try {
@@ -93,9 +55,9 @@ export function KanbanBoard() {
   };
 
   const handleAnswerQuestions = async () => {
-    if (!activeModalStory) return;
+    if (!modalStory) return;
     try {
-      setStories((prev) => prev.map(s => s.id === activeModalStory.id ? { ...s, state: 'processing' } : s));
+      setStories((prev) => prev.map(s => s.id === modalStory.id ? { ...s, state: 'processing' } : s));
       
       const combinedAnswer = questions && questions.length > 0
         ? questions.map(q => `Question: ${q}\nAnswer: ${answers[q] || "N/A"}`).join('\n\n')
@@ -104,7 +66,7 @@ export function KanbanBoard() {
       if (!combinedAnswer.trim()) return;
 
       const clarification = `User Answer to Clarifying Questions:\n${combinedAnswer}`;
-      await invoke('dispatch_agent', { id: activeModalStory.id, additionalContext: clarification });
+      await invoke('dispatch_agent', { id: modalStory.id, additionalContext: clarification });
       setActiveModalStory(null);
       setAnswers({});
     } catch (e) {
@@ -113,24 +75,36 @@ export function KanbanBoard() {
     }
   };
 
-  const toggleAIForColumn = (col: StoryStatus) => {
+  const toggleAIForColumn = async (col: StoryStatus) => {
+    const isActivating = !activeAIColumns.has(col);
     setActiveAIColumns(prev => {
       const next = new Set(prev);
       if (next.has(col)) next.delete(col);
       else next.add(col);
       return next;
     });
+
+    if (isActivating) {
+      try {
+        await invoke('clear_column_state', { status: col });
+        fetchStories();
+      } catch (e) {
+        console.error("Failed to clear column state:", e);
+      }
+    }
   };
 
   const handleCreate = async () => {
     if (!newTitle.trim()) return;
     try {
-      const newStory = await invoke<Story>('create_story', { title: newTitle });
+      const newStory = await invoke<Story>('create_story', { 
+        title: newTitle,
+        skip_clarification: skipClarification ? 1 : 0
+      });
       setStories((prev) => [...prev, newStory]);
       setNewTitle('');
+      setSkipClarification(false);
       setIsAdding(false);
-      
-      // Auto-trigger if column is active and not on hold
       if (activeAIColumns.has(newStory.status) && newStory.ai_hold === 0) {
         handleAIPush(newStory.id);
       }
@@ -139,9 +113,43 @@ export function KanbanBoard() {
     }
   };
 
+  const handleDragStart = (e: React.DragEvent, id: string) => {
+    setDraggingId(id);
+    e.dataTransfer.setData('text/plain', id);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+  };
+
+  const handleDrop = async (e: React.DragEvent, targetStatus: StoryStatus) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('text/plain');
+    if (!id) return;
+
+    setStories((prev) => prev.map((s) => (s.id === id ? { ...s, status: targetStatus } : s)));
+    setDraggingId(null);
+
+    try {
+      if (['To Do', 'In Progress', 'Review'].includes(targetStatus)) {
+        await invoke('update_story_status', { id, status: targetStatus });
+        await invoke('update_story_ready', { id, ready: true }); 
+      } else {
+        await invoke('update_story_status', { id, status: targetStatus });
+      }
+      fetchStories();
+      if (activeAIColumns.has(targetStatus)) {
+        handleAIPush(id);
+      }
+    } catch (err) {
+      console.error("Failed to update status in DB", err);
+      fetchStories();
+    }
+  };
+
   const handleAIPush = async (id: string) => {
     try {
-      setStories((prev) => prev.map(s => s.id === id ? { ...s, state: 'processing', agent: 'Builder' } : s));
+      setStories((prev) => prev.map(s => s.id === id ? { ...s, state: 'processing' } : s));
       await invoke('dispatch_agent', { id, additionalContext: null });
     } catch (e) {
       console.error("Failed to dispatch agent:", e);
@@ -172,328 +180,273 @@ export function KanbanBoard() {
   };
 
   useEffect(() => {
-    const interval = setInterval(fetchStories, 3000); // Simple polling for agent updates
-    return () => clearInterval(interval);
-  }, []);
-
-  // Automatic "One by One" Processing Loop
-  useEffect(() => {
-    const processNext = async () => {
-      // Check if any story is currently processing
-      const isAnythingProcessing = stories.some(s => s.state === 'processing');
-      if (isAnythingProcessing) return;
-
-      // Find the next eligible story
-      // Priority: Left-to-right columns, then top-to-bottom cards
+    const tick = async () => {
+      let fresh: Story[] = [];
+      try {
+        fresh = await invoke<Story[]>('get_stories');
+        setStories(fresh);
+      } catch (e) {
+        console.error(e);
+        return;
+      }
+      const isProcessing = fresh.some(s => s.state === 'processing');
+      if (isProcessing) return;
       for (const col of COLUMNS) {
         if (!activeAIColumns.has(col)) continue;
-        
-        const nextInCol = stories.find(s => 
-          s.status === col && 
-          s.ai_hold === 0 && 
-          (!s.state || s.state === 'idle' || s.state === 'failed')
+        const next = fresh.find(s =>
+          s.status === col &&
+          s.ai_hold === 0 &&
+          (col === 'Raw Requirements' || s.ai_ready === 1) &&
+          s.state === 'idle'
         );
-
-        if (nextInCol) {
-          handleAIPush(nextInCol.id);
-          break; // Process one by one
+        if (next) {
+          handleAIPush(next.id);
+          break;
         }
       }
     };
-
-    const timer = setTimeout(processNext, 2000);
-    return () => clearTimeout(timer);
-  }, [stories, activeAIColumns]);
-
-  const handleDragStart = (e: React.DragEvent, id: string) => {
-    setDraggingId(id);
-    e.dataTransfer.setData('text/plain', id);
-  };
-
-  const handleDragOver = (e: React.DragEvent) => {
-    e.preventDefault();
-  };
-
-  const handleDrop = async (e: React.DragEvent, targetStatus: StoryStatus) => {
-    e.preventDefault();
-    const id = e.dataTransfer.getData('text/plain');
-    if (!id || id === draggingId) return;
-
-    // Optimistically update UI
-    setStories((prev) => prev.map((s) => (s.id === id ? { ...s, status: targetStatus } : s)));
-    setDraggingId(null);
-
-    // Persist to sqlite DB
-    try {
-      await invoke('update_story_status', { id, status: targetStatus });
-      
-      // Auto-trigger AI if column is active
-      if (activeAIColumns.has(targetStatus)) {
-        handleAIPush(id);
-      }
-    } catch (err) {
-      console.error("Failed to update status in DB", err);
-      fetchStories(); // revert on failure
-    }
-  };
+    const interval = setInterval(tick, 4000);
+    return () => clearInterval(interval);
+  }, [activeAIColumns]);
 
   return (
-    <div className="flex h-full w-full bg-background overflow-x-auto p-4 gap-4">
-      {COLUMNS.map((col) => {
-        const colStories = stories.filter((s) => s.status === col);
-
-        return (
-          <div
-            key={col}
-            className="flex-shrink-0 flex flex-col bg-surface border border-border rounded-md w-72 h-full"
-            onDragOver={handleDragOver}
-            onDrop={(e) => handleDrop(e, col)}
-          >
-            {/* Column Header */}
-            <div className="p-3 border-b border-border flex flex-col gap-2">
-              <div className="flex items-center justify-between w-full">
-                <div className="flex items-center gap-2">
-                  <span className="text-[10px] uppercase font-bold text-text-muted tracking-wide truncate max-w-[120px]">{col}</span>
-                  <span className="text-[10px] text-text-muted bg-background px-1.5 py-0.5 rounded-full font-mono">{colStories.length}</span>
-                </div>
-                
-                <div className="flex items-center gap-1.5">
-                  <button 
-                    onClick={() => toggleAIForColumn(col)}
-                    className={`p-1.5 rounded-md transition-all ${
-                      activeAIColumns.has(col) 
-                        ? 'text-green-500 bg-green-500/5 hover:bg-green-500/10' 
-                        : 'text-text-muted hover:bg-white/5'
-                    }`}
-                    title={activeAIColumns.has(col) ? "AI Processing Active" : "AI Processing Paused"}
-                  >
-                    {activeAIColumns.has(col) ? <Play size={12} fill="currentColor" className="animate-pulse-slow" /> : <div className="w-3 h-3 border-2 border-text-muted rounded-[2px]" />}
-                  </button>
-                </div>
-              </div>
-
-              {/* Model Strategy Selector */}
-              {col !== 'Done' && col !== 'Backlog' && (
-                <div className="flex items-center gap-2">
-                  <span className="text-[9px] text-text-muted uppercase font-semibold">Brain:</span>
-                  <select 
-                    value={config?.column_strategies?.[col] || (config?.providers?.find((p: any) => p.active)?.id || '')}
-                    onChange={(e) => handleSetColumnStrategy(col, e.target.value)}
-                    className="flex-1 bg-background border border-border text-[10px] py-0.5 px-1 rounded-sm text-text-muted focus:outline-none focus:border-primary/50 cursor-pointer appearance-none hover:text-text transition-colors"
-                  >
-                    {config?.providers?.map((p: any) => (
-                      <option key={p.id} value={p.id}>{p.name}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
+    <div className="flex flex-col h-full bg-[#121212] text-text font-sans selection:bg-primary/30 antialiased overflow-hidden relative">
+      <div className="flex-shrink-0 flex items-center justify-between p-4 border-b border-border/60 bg-surface/30 backdrop-blur-sm z-10">
+        <div className="flex items-center gap-6">
+          <div className="flex items-center gap-3">
+            <div className="p-2 bg-primary/10 rounded-lg text-primary ring-1 ring-primary/20">
+              <Bot size={20} />
             </div>
+            <div>
+              <h1 className="text-sm font-bold tracking-tight text-white/90">Autonomous SDLC</h1>
+              <p className="text-[10px] text-text-muted font-medium opacity-50 uppercase tracking-widest">{activeAIColumns.size > 0 ? 'Agent Loop: Active' : 'Agent Loop: Paused'}</p>
+            </div>
+          </div>
+        </div>
+      </div>
 
-            {/* Column Body */}
-            <div className="flex-1 p-2 space-y-2 overflow-y-auto">
-              
-              {/* Raw Requirements Add Button */}
-              {col === 'Raw Requirements' && !isAdding && (
-                <button 
-                  onClick={() => setIsAdding(true)}
-                  className="w-full py-2 border border-dashed border-border rounded text-text-muted hover:text-text hover:border-primary/50 text-xs flex items-center justify-center gap-2 transition-colors"
-                >
-                  <Plus size={14} /> New Story
-                </button>
-              )}
-              {col === 'Raw Requirements' && isAdding && (
-                <div className="bg-background border border-primary/50 rounded p-2 flex flex-col gap-2">
-                  <input
-                    type="text"
-                    autoFocus
-                    value={newTitle}
-                    onChange={(e) => setNewTitle(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') handleCreate();
-                      if (e.key === 'Escape') setIsAdding(false);
-                    }}
-                    placeholder="Describe a task..."
-                    className="bg-surface text-sm text-text outline-none p-1.5 rounded"
-                  />
-                  <div className="flex gap-2">
-                    <button onClick={handleCreate} className="bg-primary hover:bg-primary/90 text-white rounded px-2 py-1 text-xs flex-1 flex items-center justify-center gap-1">
-                      <CornerDownLeft size={12} /> Save
-                    </button>
-                    <button onClick={() => setIsAdding(false)} className="bg-surface hover:bg-[#3c3c3c] text-text-muted rounded px-2 py-1 text-xs">
-                      Cancel
-                    </button>
+      <div className="flex-1 overflow-x-auto p-4 custom-scrollbar">
+        <div className="flex gap-4 h-full min-w-max">
+          {COLUMNS.map((col) => {
+            const colStories = stories.filter((s) => s.status === col);
+            return (
+              <div
+                key={col}
+                onDragOver={handleDragOver}
+                onDrop={(e) => handleDrop(e, col)}
+                className="w-72 flex flex-col h-full rounded-xl bg-surface/20 border border-border/40 backdrop-blur-sm shadow-inner group/column transition-all duration-300 hover:bg-surface/30 px-2.5 pb-2.5 pt-0"
+              >
+                <div className="flex items-center justify-between p-3.5 mb-2 sticky top-0 bg-transparent z-10">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-xs font-bold uppercase tracking-widest text-[#999] group-hover/column:text-white/100 transition-colors pointer-events-none">{col}</h2>
+                    <span className="text-[10px] bg-white/5 border border-white/10 px-2 py-0.5 rounded-full font-mono text-text-muted">{colStories.length}</span>
                   </div>
-                </div>
-              )}
-
-              {colStories.map((story) => (
-                <div
-                  key={story.id}
-                  draggable
-                  onDragStart={(e) => handleDragStart(e, story.id)}
-                  onClick={() => setActiveModalStory(story)}
-                  className={`bg-background border rounded p-3 cursor-pointer active:cursor-grabbing shadow-sm hover:border-primary/50 transition-colors
-                    ${draggingId === story.id ? 'opacity-50 border-dashed border-primary' : 'border-border'}
-                    ${story.state === 'failed' ? 'border-red-500/50' : ''}
-                    ${story.state === 'success' ? 'border-green-500/30' : ''}
-                  `}
-                >
-                  <div className="flex items-center justify-between mb-2">
-                    <span className="text-xs font-mono text-blue-400">{story.id}</span>
-                    <div className="flex gap-1">
-                      {/* Hold / Resume Toggle */}
-                      <button 
-                        onClick={(e) => handleToggleHold(story.id, e)}
-                        className={`text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded border transition-colors ${
-                          story.ai_hold === 1 
-                            ? 'bg-orange-900/40 text-orange-400 border-orange-700/50 hover:bg-orange-800/60'
-                            : 'bg-green-900/40 text-green-400 border-green-700/50 hover:bg-green-800/60'
-                        }`}
-                        title={story.ai_hold === 1 ? "Resume AI Processing" : "Put on Hold"}
-                      >
-                         {story.ai_hold === 1 ? <Play size={10} fill="currentColor" /> : <div className="w-2.5 h-2.5 bg-green-400 rounded-sm" />}
-                         {story.ai_hold === 1 ? 'Paused' : 'Ready'}
+                  <div className="flex items-center gap-1">
+                     <button 
+                        onClick={() => toggleAIForColumn(col)}
+                        className={`p-1.5 rounded-md transition-all hover:scale-110 active:scale-95 ${activeAIColumns.has(col) ? 'text-primary bg-primary/10 hover:bg-primary/20 shadow-[0_0_10px_rgba(59,130,246,0.2)]' : 'text-text-muted hover:text-white bg-white/5'}`}
+                        title={activeAIColumns.has(col) ? `Pause AI in ${col}` : `Force Start / Reset AI in ${col}`}
+                     >
+                       {activeAIColumns.has(col) ? <AlertOctagon size={14} /> : <Play size={14} fill="currentColor" />}
+                     </button>
+                    {col === 'Raw Requirements' && (
+                      <button onClick={() => setIsAdding(true)} className="p-1.5 hover:bg-white/5 text-text-muted hover:text-white rounded-md transition-colors">
+                        <Plus size={14} />
                       </button>
-
-                      {story.state === 'processing' && (
-                        <span 
-                          className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded border bg-yellow-900/40 text-yellow-400 border-yellow-700/50 animate-pulse"
-                        >
-                          <TerminalSquare size={10} /> Running...
-                        </span>
-                      )}
-                      
-                      <button 
-                         onClick={(e) => handleDelete(story.id, e)}
-                         className="text-[10px] flex items-center gap-1 px-1.5 py-0.5 rounded border border-border hover:bg-red-900/40 hover:text-red-400 hover:border-red-700/50 text-text-muted transition-colors transition-opacity pointer-events-auto"
-                         title="Delete Story"
-                      >
-                         <Trash2 size={10} />
-                      </button>
-                    </div>
-                  </div>
-
-                  <p className="text-sm text-text leading-snug mb-2 pointer-events-none">{story.title}</p>
-                  {story.description && (
-                    <div className="text-[10px] text-text-muted line-clamp-3 mb-2 bg-surface/50 p-1.5 rounded border border-border/50">
-                      {story.description.replace(/# Title:.*?\n/, '').trim()}
-                    </div>
-                  )}
-
-                  {/* AI Task Progress */}
-                  {storyTasks[story.id] && storyTasks[story.id].length > 0 && (() => {
-                    const tasks = storyTasks[story.id];
-                    const done = tasks.filter(t => t.completed).length;
-                    const total = tasks.length;
-                    const pct = Math.round((done / total) * 100);
-                    return (
-                      <div className="mb-2" onClick={e => e.stopPropagation()}>
-                        <div className="flex items-center justify-between text-[9px] text-text-muted mb-1">
-                          <span className="font-semibold uppercase tracking-wide">Progress</span>
-                          <span className="font-mono">{done}/{total}</span>
-                        </div>
-                        <div className="h-1 bg-surface rounded-full overflow-hidden">
-                          <div
-                            className="h-full bg-gradient-to-r from-blue-500 to-primary transition-all duration-500"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        {tasks.length <= 5 && (
-                          <ul className="mt-1.5 space-y-0.5">
-                            {tasks.map((t: any) => (
-                              <li key={t.id} className="flex items-start gap-1.5 text-[9px] text-text-muted">
-                                <span className={`mt-px flex-shrink-0 w-2.5 h-2.5 rounded-sm border flex items-center justify-center ${
-                                  t.completed ? 'bg-green-500/20 border-green-500/50' : 'border-border'
-                                }`}>
-                                  {t.completed && <CheckCircle size={7} className="text-green-400" />}
-                                </span>
-                                <span className={t.completed ? 'line-through opacity-50' : ''}>{t.title}</span>
-                              </li>
-                            ))}
-                          </ul>
-                        )}
-                      </div>
-                    );
-                  })()}
-
-                  <div className="flex items-center justify-between text-xs text-text-muted">
-                    {/* Agent Status Icon */}
-                    <div className="flex items-center gap-1">
-                      {story.state === 'processing' && <TerminalSquare size={13} className="text-yellow-500 animate-pulse" />}
-                      {story.state === 'failed' && <AlertOctagon size={13} className="text-red-500" />}
-                      {story.state === 'success' && <CheckCircle size={13} className="text-green-500" />}
-                      {!story.state && <CircleDashed size={13} />}
-                      
-                      <span className="font-medium">
-                        {story.agent ? story.agent : 'Unassigned'}
-                      </span>
-                    </div>
-
-                    {/* AI Avatar */}
-                    {story.agent && (
-                      <div className="h-5 w-5 rounded bg-[#3c3c3c] flex items-center justify-center text-text border border-border">
-                        <Bot size={12} />
-                      </div>
                     )}
                   </div>
                 </div>
-              ))}
-            </div>
-          </div>
-        );
-      })}
 
-      {/* Story Detail / Clarification Modal */}
-      {activeModalStory && (
-        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm">
-          <div className="bg-surface border border-border rounded-lg max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl overflow-hidden animate-in fade-in zoom-in duration-200">
-            <div className="p-4 border-b border-border flex items-center justify-between">
-              <h3 className="font-semibold text-text flex items-center gap-2">
-                <Bot size={18} className="text-primary" /> Story Details: {activeModalStory.id}
-              </h3>
-              <button onClick={() => { setActiveModalStory(null); setAnswers({}); }} className="text-text-muted hover:text-text transition-colors">
+                <div className="flex-1 overflow-y-auto custom-scrollbar flex flex-col gap-3 min-h-[100px]">
+                  {colStories.length === 0 && (
+                    <div className="flex-1 flex flex-col items-center justify-center gap-2 opacity-10 pointer-events-none border-2 border-dashed border-white/50 rounded-lg m-1">
+                      <div className="w-8 h-8 rounded-full border-2 border-current flex items-center justify-center">
+                        <CircleDashed size={16} />
+                      </div>
+                      <span className="text-[10px] uppercase font-bold tracking-wider">Empty Column</span>
+                    </div>
+                  )}
+
+                  {colStories.map((story) => (
+                    <div
+                      key={story.id}
+                      draggable
+                      onDragStart={(e) => handleDragStart(e, story.id)}
+                      onClick={() => setActiveModalStory(story)}
+                      className={`bg-[#1e1e1e]/80 border border-border/40 rounded-xl p-3 cursor-pointer active:cursor-grabbing shadow-lg hover:border-primary/50 hover:shadow-primary/5 hover:translate-y-[-1px] active:translate-y-[1px] transition-all duration-200 group/card relative
+                        ${draggingId === story.id ? 'opacity-50 ring-2 ring-primary border-transparent' : 'border-border/40'}
+                        ${story.state === 'failed' ? 'border-red-500/40 bg-red-900/5 shadow-red-500/5' : ''}
+                        ${story.state === 'success' ? 'border-green-500/10' : ''}
+                      `}
+                    >
+                      <div className="flex items-center justify-between mb-2.5">
+                        <div className="flex items-center gap-2">
+                           <span className="text-[9px] font-bold py-0.5 px-1.5 bg-black/40 text-blue-400 rounded-md border border-blue-400/20 tracking-wider font-mono uppercase">{story.id}</span>
+                           {story.agent && (
+                             <span className="text-[9px] text-primary/80 font-bold uppercase tracking-widest">{story.agent}</span>
+                           )}
+                        </div>
+                        <div className="flex gap-1.5 items-center" onClick={e => e.stopPropagation()}>
+                           <button 
+                             onClick={(e) => handleToggleHold(story.id, e)}
+                             className={`text-[9px] font-bold flex items-center gap-1.5 px-2 py-0.5 rounded-full border border-border transition-all ${story.ai_hold === 1 ? 'bg-background hover:bg-white/5 text-text-muted' : 'bg-green-500/10 border-green-500/20 text-green-400'}`}
+                             title={story.ai_hold === 1 ? "Resume AI Processing" : "Put on Hold"}
+                           >
+                              {story.ai_hold === 1 ? <Play size={8} fill="currentColor" /> : <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse shadow-[0_0_8px_rgba(74,222,128,0.5)]" />}
+                              {story.ai_hold === 1 ? 'Paused' : 'Ready'}
+                           </button>
+
+                           {story.state === 'processing' && (
+                             <div className="flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-yellow-400/10 border border-yellow-400/20">
+                               <div className="w-1.5 h-1.5 bg-yellow-400 rounded-full animate-ping" />
+                             </div>
+                           )}
+                           
+                           <button 
+                              onClick={(e) => handleDelete(story.id, e)}
+                              className="w-5 h-5 flex items-center justify-center rounded-full border border-border text-text-muted opacity-0 group-hover/card:opacity-100 hover:bg-red-500/20 hover:text-red-400 hover:border-red-500/30 transition-all pointer-events-auto"
+                              title="Delete Story"
+                           >
+                              <Trash2 size={10} />
+                           </button>
+                        </div>
+                      </div>
+
+                      <p className="text-xs font-bold text-white/90 leading-relaxed mb-3 pointer-events-none tracking-tight">{story.title}</p>
+                      
+                      {story.description && (
+                        <div className="text-[10px] text-text-muted line-clamp-2 mb-2 bg-black/20 p-2 rounded-lg border border-white/5 transition-all group-hover/card:bg-black/30 group-hover/card:border-white/10">
+                          <div className="uppercase text-[8px] font-bold opacity-30 tracking-widest mb-1">Mission</div>
+                          {story.description.replace(/# Title:.*?\n/, '').trim()}
+                        </div>
+                      )}
+
+                      {story.reviewer_feedback && (
+                        <div className="text-[10px] text-text-muted line-clamp-2 mb-3 bg-blue-500/5 p-2 rounded-lg border border-blue-500/20">
+                           <div className="uppercase text-[8px] font-bold text-blue-400/60 tracking-widest mb-1 flex items-center gap-1">
+                             <TerminalSquare size={8} /> Status
+                           </div>
+                           {story.reviewer_feedback.trim()}
+                        </div>
+                      )}
+
+                      <div className="flex items-center justify-between text-[9px] text-[#777] mb-1.5 px-0.5">
+                         <div className="flex items-center gap-1">
+                            {story.state === 'failed' && <AlertOctagon size={10} className="text-red-500" />}
+                            {story.state === 'success' && <CheckCircle size={10} className="text-green-500" />}
+                            {story.state === 'processing' && <TerminalSquare size={10} className="text-yellow-500 animate-pulse" />}
+                            <span className="font-bold opacity-50 uppercase tracking-widest">{story.state || 'Idle'}</span>
+                         </div>
+                      </div>
+                    </div>
+                  ))}
+
+                  {col === 'Raw Requirements' && isAdding && (
+                    <div className="bg-surface/50 border border-primary/40 rounded-xl p-3 flex flex-col gap-3 shadow-2xl animate-in fade-in zoom-in duration-200">
+                      <textarea
+                        autoFocus
+                        rows={6}
+                        value={newTitle}
+                        onChange={(e) => setNewTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) handleCreate();
+                          if (e.key === 'Escape') setIsAdding(false);
+                        }}
+                        placeholder="Paste raw requirements, bug reports, or feature requests here... (Ctrl+Enter to create)"
+                        className="bg-black/40 text-xs text-text border border-white/5 outline-none p-3 rounded-lg focus:border-primary/50 transition-all font-medium resize-none leading-relaxed"
+                      />
+                      
+                      {/* Skip Clarification Toggle */}
+                      <label className="flex items-center gap-3 px-1 cursor-pointer group select-none">
+                        <div 
+                          onClick={() => setSkipClarification(!skipClarification)}
+                          className={`w-8 h-4 rounded-full transition-all duration-300 relative ${skipClarification ? 'bg-primary' : 'bg-white/10'}`}
+                        >
+                          <div className={`absolute top-0.5 w-3 h-3 bg-white rounded-full transition-all duration-300 ${skipClarification ? 'left-4.5' : 'left-0.5'}`} />
+                        </div>
+                        <span className="text-[10px] text-text-muted group-hover:text-text transition-colors">Skip Clarifying Questions</span>
+                      </label>
+
+                      <div className="flex gap-2 items-center">
+                        <button onClick={handleCreate} className="bg-primary hover:bg-primary/90 text-white font-bold rounded-lg px-4 py-2 text-[10px] flex-1 flex items-center justify-center gap-1.5 transition-all shadow-lg shadow-primary/20">
+                          <Plus size={12} /> Create
+                        </button>
+                        <button onClick={() => setIsAdding(false)} className="bg-white/5 hover:bg-white/10 text-white/50 hover:text-white rounded-lg px-3 py-1.5 text-[10px] transition-all">
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {modalStory && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-md flex items-center justify-center z-[100] p-6 animate-in fade-in duration-300">
+          <div className="bg-[#1e1e1e] w-full max-w-2xl max-h-[85vh] rounded-2xl shadow-2xl overflow-hidden border border-border/40 flex flex-col animate-in zoom-in-95 duration-300">
+            <div className="flex-shrink-0 p-5 border-b border-border/40 flex items-center justify-between bg-white/[0.02]">
+              <div className="flex items-center gap-3">
+                <div className="p-2 bg-primary/10 rounded-xl text-primary">
+                  <Bot size={20} />
+                </div>
+                <h2 className="text-sm font-bold tracking-tight">Story Details: <span className="font-mono text-primary/80 opacity-80">{modalStory.id}</span></h2>
+              </div>
+              <button 
+                onClick={() => { setActiveModalStory(null); setAnswers({}); }}
+                className="p-2 hover:bg-white/5 text-text-muted hover:text-white rounded-xl transition-all"
+              >
                 <Plus size={18} className="rotate-45" />
               </button>
             </div>
             
-            <div className="flex-1 overflow-y-auto p-4 space-y-6">
-              {/* Title Section */}
-              <div className="space-y-1">
-                <label className="text-[10px] uppercase font-bold text-text-muted tracking-widest">Title</label>
-                <div className="text-sm font-medium p-3 bg-background rounded-md border border-border">{activeModalStory.title}</div>
+            <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-8 custom-scrollbar">
+              <div className="space-y-3">
+                <label className="text-[9px] uppercase font-bold text-text-muted tracking-[0.2em] opacity-60">Title</label>
+                <div className="text-base font-bold p-4 bg-black/20 rounded-xl border border-white/5 tracking-tight leading-relaxed">{modalStory.title}</div>
               </div>
               
-              {/* Status Section */}
-              <div className="flex gap-4">
-                 <div className="flex-1 space-y-1">
-                   <label className="text-[10px] uppercase font-bold text-text-muted tracking-widest">Status</label>
-                   <div className="text-xs px-2 py-1 bg-[#3c3c3c] text-text rounded-md w-fit border border-border">{activeModalStory.status}</div>
+              <div className="flex flex-wrap gap-8">
+                 <div className="space-y-3">
+                   <label className="text-[9px] uppercase font-bold text-text-muted tracking-[0.2em] opacity-60">Status</label>
+                   <div className="text-[10px] font-bold px-3 py-1 bg-primary/10 text-primary rounded-full border border-primary/20 w-fit uppercase tracking-widest">{modalStory.status}</div>
                  </div>
-                 {activeModalStory.agent && (
-                   <div className="flex-1 space-y-1 text-right">
-                     <label className="text-[10px] uppercase font-bold text-text-muted tracking-widest">Agent Assigned</label>
-                     <div className="text-xs text-primary font-semibold">{activeModalStory.agent}</div>
+                 {modalStory.agent && (
+                   <div className="space-y-3">
+                     <label className="text-[9px] uppercase font-bold text-text-muted tracking-[0.2em] opacity-60">Assigned Agent</label>
+                     <div className="flex items-center gap-2 text-xs font-bold text-white/90">
+                        <div className="w-1.5 h-1.5 bg-primary rounded-full animate-pulse" />
+                        {modalStory.agent}
+                     </div>
                    </div>
                  )}
               </div>
 
-              {/* Description / Content Section */}
-              <div className="space-y-2">
-                <label className="text-[10px] uppercase font-bold text-text-muted tracking-widest">
-                  {activeModalStory.status === 'Clarification Required' ? 'AI Review & Context' : 'Story Description'}
+              <div className="space-y-3">
+                <label className="text-[9px] uppercase font-bold text-text-muted tracking-[0.2em] opacity-60">
+                   {modalStory.status === 'Clarification Required' ? 'AI Assessment' : 'Story Mission & Criteria'}
                 </label>
-                <div className="text-sm p-3 bg-background rounded-md border border-border whitespace-pre-wrap font-mono prose-invert text-text leading-relaxed">
-                  {activeModalStory.status === 'Clarification Required' 
-                    ? activeModalStory.description?.split(/Clarifying Questions:?/i)[0] || activeModalStory.description
-                    : activeModalStory.description || "No description provided yet."}
+                <div className="text-[13px] p-5 bg-black/30 rounded-xl border border-white/5 whitespace-pre-wrap font-sans text-white/80 leading-[1.7] shadow-inner">
+                  {modalStory.status === 'Clarification Required' 
+                    ? modalStory.description?.split(/Clarifying Questions:?/i)[0] || modalStory.description
+                    : modalStory.description || "No mission requirements defined yet."}
                 </div>
               </div>
+
+              {modalStory.reviewer_feedback && (
+                <div className="space-y-3">
+                  <label className="text-[9px] uppercase font-bold text-blue-400 tracking-[0.2em] opacity-80">Latest Audit Activity & Progress</label>
+                  <div className="text-[12px] p-5 bg-blue-500/[0.03] rounded-xl border border-blue-500/20 whitespace-pre-wrap font-mono text-blue-200/70 leading-[1.6]">
+                    {modalStory.reviewer_feedback.trim()}
+                  </div>
+                </div>
+              )}
               
-              {/* Question & Answer Forms for Clarification Required stories */}
-              {activeModalStory.status === 'Clarification Required' && (
-                <div className="space-y-4 pt-4 border-t border-border">
-                  <label className="text-[10px] uppercase font-bold text-primary tracking-widest block">Clarifying Questions & Your Answers</label>
-                  
+              {modalStory.status === 'Clarification Required' && (
+                <div className="space-y-4 pt-4 border-t border-border/40">
+                  <label className="text-[9px] uppercase font-bold text-primary tracking-[0.2em] block">Clarifying Questions & Your Answers</label>
                   {questions && questions.length > 0 ? (
                     questions.map((q, i) => (
                       <div key={i} className="space-y-2 group">
@@ -502,37 +455,37 @@ export function KanbanBoard() {
                             placeholder="Your answer..."
                             value={answers[q] || ''}
                             onChange={(e) => setAnswers(prev => ({ ...prev, [q]: e.target.value }))}
-                            className="w-full bg-background border border-border rounded-md p-3 text-sm text-text outline-none focus:border-primary/50 transition-all h-20"
+                            className="w-full bg-black/40 border border-white/5 rounded-xl p-4 text-sm text-text outline-none focus:border-primary/50 transition-all h-24"
                         />
                       </div>
                     ))
                   ) : (
                     <textarea 
                       autoFocus
-                      placeholder="Provide more details or answer any questions AI might have..."
+                      placeholder="Provide more details..."
                       value={answers['default'] || ''}
                       onChange={(e) => setAnswers(prev => ({ ...prev, 'default': e.target.value }))}
-                      className="w-full h-32 bg-background border border-border rounded-md p-3 text-sm text-text outline-none focus:border-primary/50 transition-colors"
+                      className="w-full h-32 bg-black/40 border border-white/5 rounded-xl p-4 text-sm text-text outline-none focus:border-primary/50 transition-all"
                     />
                   )}
                 </div>
               )}
             </div>
             
-            <div className="p-4 border-t border-border flex justify-end gap-3 bg-surface/50">
+            <div className="p-5 border-t border-border/40 flex justify-end gap-3 bg-white/[0.01]">
               <button 
                 onClick={() => { setActiveModalStory(null); setAnswers({}); }}
-                className="px-4 py-1.5 rounded text-sm text-text hover:bg-white/5 transition-colors"
+                className="px-5 py-2 rounded-xl text-xs font-bold text-text-muted hover:text-white hover:bg-white/5 transition-all"
               >
                 Close
               </button>
-              {activeModalStory.status === 'Clarification Required' && (
+              {modalStory.status === 'Clarification Required' && (
                 <button 
                   onClick={handleAnswerQuestions}
                   disabled={Object.values(answers).every(v => !v.trim())}
-                  className="px-4 py-1.5 bg-primary hover:bg-primary/90 disabled:opacity-50 text-white rounded text-sm font-semibold flex items-center gap-2 shadow-lg shadow-primary/20 transition-all hover:scale-105 active:scale-95"
+                  className="px-6 py-2 bg-primary hover:bg-primary/90 disabled:opacity-30 disabled:grayscale text-white rounded-xl text-xs font-bold shadow-lg shadow-primary/20 transition-all active:scale-95"
                 >
-                  <Play size={14} /> Submit Answers to AI
+                  Submit Answers
                 </button>
               )}
             </div>

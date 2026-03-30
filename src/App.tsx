@@ -6,12 +6,14 @@ import { TerminalPanel } from './components/TerminalPanel';
 import { FileExplorer } from './components/FileExplorer';
 import { SettingsView } from './components/SettingsView';
 import { SidebarChat } from './components/SidebarChat';
+import { CodeEditor } from './components/CodeEditor';
 import { open } from '@tauri-apps/plugin-dialog';
 import { invoke } from '@tauri-apps/api/core';
 
 function App() {
   const [activeTab, setActiveTab] = useState<'kanban' | 'explorer' | 'settings'>('kanban');
   const [activeProject, setActiveProject] = useState<string | null>(null);
+  const [selectedFile, setSelectedFile] = useState<string | null>(null);
 
   const handleSelectProject = async () => {
     console.log("Starting project selection...");
@@ -35,6 +37,11 @@ function App() {
     } catch (err) {
       console.error("Failed to select project:", err);
     }
+  };
+
+  const handleFileClick = (path: string) => {
+    setSelectedFile(path);
+    setActiveTab('explorer');
   };
 
   return (
@@ -76,7 +83,7 @@ function App() {
                 <div className="flex-1 flex flex-col min-h-0">
                   {activeProject ? (
                     activeTab === 'explorer' ? (
-                      <FileExplorer rootPath={activeProject} />
+                      <FileExplorer rootPath={activeProject} onFileClick={handleFileClick} />
                     ) : (
                       <div className="p-2">
                         <span className="text-text-muted text-xs font-mono break-all">{activeProject}</span>
@@ -103,7 +110,7 @@ function App() {
                     {/* Tabs */}
                     <div className="h-9 flex bg-surface">
                       <div className="px-4 border-t border-t-primary border-r border-border bg-background flex items-center gap-2 cursor-pointer text-text text-sm">
-                        <span className="text-blue-400">#</span> {activeTab === 'kanban' ? 'kanban_board' : 'project_explorer'}
+                        <span className="text-blue-400">#</span> {activeTab === 'kanban' ? 'kanban_board' : selectedFile ? selectedFile.split('/').pop() : 'project_explorer'}
                       </div>
                     </div>
                     {/* Content */}
@@ -121,6 +128,8 @@ function App() {
                         </div>
                       ) : activeTab === 'kanban' ? (
                         <KanbanBoard />
+                      ) : selectedFile ? (
+                        <CodeEditor path={selectedFile} />
                       ) : (
                         <div className="h-full flex items-center justify-center text-text-muted text-center p-8">
                           <div>
@@ -135,12 +144,8 @@ function App() {
                   <Separator className="h-1 bg-border hover:bg-primary/50 transition-colors" />
                   
                   {/* Bottom Terminal Panel */}
-                  <Panel defaultSize={30} minSize={10} className="bg-[#1e1e1e] flex flex-col border-t border-border">
-                    <ul className="h-8 flex px-4 items-center gap-4 text-xs font-medium tracking-wide uppercase text-text-muted border-b border-border">
-                      <li className="cursor-pointer border-b border-transparent hover:text-text">Output</li>
-                      <li className="cursor-pointer border-b border-primary text-text">Terminal</li>
-                    </ul>
-                    <div className="flex-1 p-2 overflow-hidden flex items-stretch">
+                  <Panel defaultSize={30} minSize={10} className="bg-background flex flex-col border-t border-border overflow-hidden">
+                    <div className="flex-1 overflow-hidden flex items-stretch">
                       <TerminalPanel />
                     </div>
                   </Panel>
