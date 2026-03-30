@@ -12,7 +12,7 @@ Sandman is an AI-powered software factory that transforms product requirements i
 ## Key Differentiators
 - **State-Driven Workflow:** Moves beyond simple chat-based coding into an automated pipeline.
 - **Model Agnostic & Local-First:** Supports Claude, Gemini, and GPT-4o, with **Ollama** as a first-class option for any agent to ensure zero-cost, private execution.
-- **Zero-Cost Infrastructure:** Built on PostgreSQL (pgvector), Redis (BullMQ), and Node.js.
+- **Zero-Cost Infrastructure:** Built as a native Desktop App via Tauri (Rust), React, and embedded SQLite (`sqlite-vec`). No Redis, Node.js, or PostgreSQL dependencies required.
 
 ## Tagline
 "Build software while you sleep."

@@ -1,87 +1,73 @@
-# Sandman - Autonomous AI Software Factory
+# React + TypeScript + Vite
 
-Sandman is a monorepo project structured as an "Autonomous AI Software Factory". It leverages modern web technologies and npm workspaces to manage its various applications and packages seamlessly.
+This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
 
-## Architecture
+Currently, two official plugins are available:
 
-This project is structured as an npm monorepo with the following main applications and packages:
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-- `apps/web`: The front-end client interface.
-- `apps/server`: The backend API service.
-- `packages/runner`: Core logic and execution runner.
+## React Compiler
 
-## Getting Started
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-### Prerequisites
+## Expanding the ESLint configuration
 
-Ensure you have [Node.js](https://nodejs.org/) installed along with `npm`.
+If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
 
-### Installation
+```js
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
 
-To install all dependencies for the entire project from the root folder, run:
+      // Remove tseslint.configs.recommended and replace with this
+      tseslint.configs.recommendedTypeChecked,
+      // Alternatively, use this for stricter rules
+      tseslint.configs.strictTypeChecked,
+      // Optionally, add this for stylistic rules
+      tseslint.configs.stylisticTypeChecked,
 
-```bash
-npm run install:all
+      // Other configs...
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
 ```
 
-Alternatively, standard npm install will also run the workspace install:
+You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
 
-```bash
-npm install
+```js
+// eslint.config.js
+import reactX from 'eslint-plugin-react-x'
+import reactDom from 'eslint-plugin-react-dom'
+
+export default defineConfig([
+  globalIgnores(['dist']),
+  {
+    files: ['**/*.{ts,tsx}'],
+    extends: [
+      // Other configs...
+      // Enable lint rules for React
+      reactX.configs['recommended-typescript'],
+      // Enable lint rules for React DOM
+      reactDom.configs.recommended,
+    ],
+    languageOptions: {
+      parserOptions: {
+        project: ['./tsconfig.node.json', './tsconfig.app.json'],
+        tsconfigRootDir: import.meta.dirname,
+      },
+      // other options...
+    },
+  },
+])
 ```
-
-### Running the Environment Locally
-
-You can run individual parts of the application or the entire stack simultaneously using `concurrently`.
-
-To start all services (`web`, `server`, and `runner`) at once:
-
-```bash
-npm run dev
-```
-
-#### Running Individual Services
-
-- **Web Frontend:**
-  ```bash
-  npm run dev:web
-  ```
-
-- **Backend Server:**
-  ```bash
-  npm run dev:server
-  ```
-
-- **Runner Package:**
-  ```bash
-  npm run dev:runner
-  ```
-
-## Repository Structure
-
-```
-sandman/
-├── apps/         # Applications (web interface, backend server, etc.)
-│   ├── web/
-│   └── server/
-├── packages/     # Shared packages and libraries
-│   └── runner/
-├── docs/         # Documentation resources
-├── package.json  # Root package file containing main scripts and workspaces schema
-└── README.md     # This readme file
-```
-
-## Workspaces Setup
-
-This repository relies on [npm workspaces](https://docs.npmjs.com/cli/v10/using-npm/workspaces) defined in the root `package.json`:
-
-```json
-"workspaces": [
-  "apps/*",
-  "packages/*"
-]
-```
-
-## Contributing
-
-Make sure to install dependencies and test changes locally using the workspace scripts before opening a pull request.

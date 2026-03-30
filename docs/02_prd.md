@@ -4,9 +4,13 @@
 Enable a Product Owner to manage an autonomous software development lifecycle where AI agents handle requirements refinement, coding, and quality assurance.
 
 ## Features
-### 1. Kanban Board
+### 1. Workspace & Project Management
+- **Multi-Project Support:** A single Sandman instance can manage multiple local codebases.
+- **Seamless Switching:** Users can switch between projects/folders without losing history, stories, or embeddings.
+
+### 2. Kanban Board
 - Columns: Backlog, To Do, In Progress, Review, Testing, Done.
-- Real-time updates via WebSockets.
+- Real-time updates via Tauri IPC Events.
 
 ### 2. Story Management
 - **Ready for AI Toggle:** Explicit human-in-the-loop trigger to start automation.
@@ -15,7 +19,7 @@ Enable a Product Owner to manage an autonomous software development lifecycle wh
 
 ### 3. Agent System
 - **Story Agent:** Refines raw input into structured User Stories and Acceptance Criteria (AC).
-- **Builder Agent:** Context-aware code generation using RAG (pgvector).
+- **Builder Agent:** Context-aware code generation using RAG (`sqlite-vec`).
 - **Reviewer Agent:** Validates code against AC and build success.
 
 ## Success Metrics

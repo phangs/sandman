@@ -1,25 +1,28 @@
 # Architecture
 
 ## System Design
-[Web UI] <-> [Backend (Orchestrator + BullMQ)] <-> [Local Runner] <-> [Codebase]
+[React Web UI (Vite)] <-> [Tauri Backend (Rust)] <-> [Embedded SQLite] / [Local Codebase]
 
 ## Components
 
-### 1. Backend (The Brain)
-- **Queue Manager:** BullMQ (Redis) handles durable task handoffs between agents.
-- **LLM Factory:** A provider-agnostic interface supporting OpenAI, Anthropic, Gemini, and Ollama.
-- **Context Provider:** RAG engine using `pgvector` to inject relevant code snippets into agent prompts.
+### 1. Tauri Backend (The Brain & Muscle)
+- **Rust Engine:** Consolidates the UI host, the LLM orchestrator, and the command runner into a single high-performance binary.
+- **Queue Manager:** Lightweight async queuing using `tokio` channels or a SQLite-backed job table (no Redis/Postgres needed).
+- **LLM Factory:** Native Rust HTTP clients (`reqwest`) supporting seamless switching between Cloud APIs (OpenAI, Anthropic, Gemini) and Local APIs (Ollama/LM Studio).
+- **Context Provider:** RAG engine using `sqlite-vec` (`rusqlite`/`sqlx`) to inject relevant code snippets into agent prompts.
 
-### 2. PostgreSQL + pgvector (Unified Store)
+### 2. Embedded SQLite + sqlite-vec (Unified Store)
+- **Multi-Project Aware:** The `projects` table stores the absolute paths to different local codebases.
+- Every `story`, codebase vector `embedding`, and `log` is isolated by a `project_id`.
 - Stores relational data (Stories, Logs) and vector embeddings (Codebase chunks).
 - Enables $0 cost semantic search for the Builder Agent.
 
-### 3. Local Runner (The Hands)
-- A CLI tool that polls the `code-execution` queue.
-- Executes Git branching, file writes, and shell commands (`npm test`, etc.).
-- Reports logs and exit codes back to the Orchestrator.
+### 3. Local Execution Engine (Rust Child Processes)
+- A dedicated async Rust supervisor embedded inside Tauri.
+- Uses `std::process::Command` to execute Git branching, file writes, and shell commands (`npm test`, etc.) securely without memory leaks.
+- Streams highly-efficient live `stdout`/`stderr` logs back to the React UI via Tauri `Window::emit()`.
 
 ## Failure & Retry Logic
-- **Build Failure:** Runner captures `stderr` -> Increments `retry_count` -> Re-queues to Builder with error context.
+- **Build Failure:** Rust captures `stderr` -> Increments `retry_count` -> Re-queues the task internally with error context.
 - **Review Failure:** Reviewer adds comments -> Re-queues to Builder.
 - **Circuit Breaker:** If `retry_count >= 3`, status moves to `STALLED` for human review.

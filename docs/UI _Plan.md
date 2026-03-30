@@ -1,15 +1,18 @@
 
 ---
 
-## ### 1. The Kanban Board Layout
-The UI needs to be more than just columns; it needs to be a **Command Center**.
+## ### 1. The "Web IDE" Layout
+Instead of a simple dashboard, Sandman will look exactly like VS Code, using a dark theme (`VS Code Dark+`) and customizable docking panels.
 
-* **Header:** Project Name, Connection Status (to Backend/Redis), and a "Global Settings" (LLM Provider mapping).
-* **The Board:** 5-6 Columns. Each card represents a `Story`.
-* **The Card:** * Title & ID.
-    * **Status Indicators:** (e.g., "AI Processing", "Retrying 1/3", "Success").
-    * **The "Ready for AI" Toggle:** A high-visibility switch.
-* **Side Panel (The "Terminal"):** A slide-out panel that opens when you click a card, showing the live streaming logs from the Local Runner.
+* **Activity Bar (Far Left):** Thin vertical bar for switching main views (e.g., Kanban/Stories, File Explorer, System Settings).
+* **Side Bar (Left):** 
+    * If "Kanban" is selected: Shows a compacted list of active stories.
+    * If "Explorer" is selected: Shows the target project's file tree (fetching from local runner).
+* **Editor Group (Center):** Powered by **Monaco Editor**. 
+    * Displays the `sandman.config.json` file.
+    * Shows side-by-side **Code Diffs** when the Reviewer Agent proposes changes.
+    * Shows a full-width Kanban Board view if no files are open.
+* **Panel (Bottom):** Powered by **Xterm.js**. A real-time terminal streaming `stdout`/`stderr` from the Local Runner and AI agent thoughts over WebSocket.
 
 
 
@@ -48,10 +51,13 @@ Since the AI moves the cards, the UI needs clear visual states:
 
 ---
 
-## ### 4. UI Tech Stack Recommendations (Zero-Cost)
-* **Styling:** **Tailwind CSS** (Fastest for prototyping).
-* **Icons:** **Lucide React** (Clean, developer-focused icons).
-* **Components:** **Shadcn/UI** (Pre-built accessible components like Switches, Dialogs, and Cards).
+## ### 4. UI Tech Stack Recommendations (Zero-Cost & Professional IDE)
+* **Styling:** **Tailwind CSS** (Configured accurately to `VS Code Dark+` colors).
+* **Icons:** **Lucide React** & VS Code standard File Icons.
+* **Layout Engine:** **`react-resizable-panels`** (for standard VS Code draggable split panes).
+* **Code Editor:** **`@monaco-editor/react`** (The exact engine powering VS Code).
+* **Terminal:** **`xterm.js`** + `@xterm/addon-fit` (The exact terminal powering VS Code).
+* **Components:** **Shadcn/UI** (for dropdowns, menus, setup modals).
 
 
 

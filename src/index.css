@@ -1,0 +1,26 @@
+@import "tailwindcss";
+
+@theme {
+  --color-background: #1e1e1e;
+  --color-surface: #252526;
+  --color-surface-hover: #2a2d2e;
+  --color-border: #3c3c3c;
+  --color-primary: #007acc;
+  --color-text: #cccccc;
+  --color-text-muted: #858585;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  background-color: var(--color-background);
+  color: var(--color-text);
+  font-family: 'Consolas', 'Courier New', monospace;
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root {
+  width: 100%;
+  height: 100%;
+}
