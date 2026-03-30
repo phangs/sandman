@@ -62,6 +62,15 @@ pub async fn init_db(project_path: &str) -> Result<SqlitePool, String> {
     let _ = sqlx::query("ALTER TABLE stories ADD COLUMN description TEXT").execute(&pool).await;
     let _ = sqlx::query("ALTER TABLE stories ADD COLUMN ai_hold INTEGER DEFAULT 0").execute(&pool).await;
 
+    // AI Progress Tracking
+    let _ = sqlx::query("CREATE TABLE IF NOT EXISTS story_tasks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        story_id TEXT NOT NULL,
+        title TEXT NOT NULL,
+        completed INTEGER DEFAULT 0,
+        FOREIGN KEY(story_id) REFERENCES stories(id) ON DELETE CASCADE
+    )").execute(&pool).await;
+
     // 2. Vector table (Requires sqlite-vec extension)
     // We attempt this separately so the app doesn't crash if the extension isn't loaded
     let vec_schema = "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[1536]);";

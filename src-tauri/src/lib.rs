@@ -23,8 +23,15 @@ fn get_config(app: tauri::AppHandle) -> Result<Config, String> {
 }
 
 #[tauri::command]
-fn save_global_config(config: Config, app: tauri::AppHandle) -> Result<(), String> {
-    save_config(&app, &config)
+fn save_global_config(config: crate::config::Config, app: tauri::AppHandle) -> Result<(), String> {
+    crate::config::save_config(&app, &config)
+}
+
+#[tauri::command]
+fn set_column_strategy(status: String, provider_id: String, app: tauri::AppHandle) -> Result<(), String> {
+    let mut config = crate::config::load_config(&app);
+    config.column_strategies.insert(status, provider_id);
+    crate::config::save_config(&app, &config)
 }
 
 #[tauri::command]
@@ -134,6 +141,63 @@ async fn update_story_status(id: String, status: String, state: tauri::State<'_,
 }
 
 #[tauri::command]
+async fn get_story_tasks(story_id: String, state: tauri::State<'_, AppState>) -> Result<Vec<serde_json::Value>, String> {
+    let pool = {
+        let guard = state.db.lock().unwrap();
+        guard.clone()
+    }.ok_or("No project connected")?;
+
+    use sqlx::Row;
+    let rows = sqlx::query("SELECT id, title, completed FROM story_tasks WHERE story_id = ?")
+        .bind(&story_id)
+        .fetch_all(&pool)
+        .await
+        .map_err(|e: sqlx::Error| e.to_string())?;
+
+    Ok(rows.into_iter().map(|row| {
+        let id: i64 = row.try_get("id").unwrap_or(0);
+        let title: String = row.try_get("title").unwrap_or_default();
+        let completed: i64 = row.try_get("completed").unwrap_or(0);
+        serde_json::json!({
+            "id": id,
+            "title": title,
+            "completed": completed != 0
+        })
+    }).collect())
+}
+
+#[tauri::command]
+async fn create_story_task(story_id: String, title: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let pool = {
+        let guard = state.db.lock().unwrap();
+        guard.clone()
+    }.ok_or("No project connected")?;
+
+    sqlx::query("INSERT INTO story_tasks (story_id, title) VALUES (?, ?)")
+        .bind(story_id)
+        .bind(title)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn update_story_task(task_id: i64, completed: bool, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let pool = {
+        let guard = state.db.lock().unwrap();
+        guard.clone()
+    }.ok_or("No project connected")?;
+
+    sqlx::query("UPDATE story_tasks SET completed = ? WHERE id = ?")
+        .bind(if completed { 1 } else { 0 })
+        .bind(task_id)
+        .execute(&pool)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+#[tauri::command]
 async fn delete_story(id: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     let pool = {
         let guard = state.db.lock().unwrap();
@@ -212,7 +276,7 @@ async fn list_files(path: String) -> Result<Vec<FileEntry>, String> {
 
 #[tauri::command]
 async fn chat_with_agent(messages: Vec<Message>, app: tauri::AppHandle) -> Result<String, String> {
-    call_llm(&app, messages).await
+    call_llm(&app, messages, None).await
 }
 
 async fn read_file_internal(path: &str, state: &tauri::State<'_, AppState>) -> Result<String, String> {
@@ -245,6 +309,17 @@ async fn write_file_internal(path: &str, content: &str, state: &tauri::State<'_,
     }
 
     std::fs::write(full_path, content).map_err(|e| e.to_string())
+}
+
+async fn apply_patch_internal(path: &str, old_content: &str, new_content: &str, state: &tauri::State<'_, AppState>) -> Result<(), String> {
+    let current_content = read_file_internal(path, state).await?;
+    
+    if !current_content.contains(old_content) {
+        return Err("Target content not found in file. Please ensure old_content matches exactly.".to_string());
+    }
+
+    let patched_content = current_content.replace(old_content, new_content);
+    write_file_internal(path, &patched_content, state).await
 }
 
 async fn run_project_command_internal(command: &str, args: Vec<String>, state: &tauri::State<'_, AppState>) -> Result<String, String> {
@@ -323,6 +398,11 @@ async fn read_file(path: String, state: tauri::State<'_, AppState>) -> Result<St
 #[tauri::command]
 async fn write_file(path: String, content: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
     write_file_internal(&path, &content, &state).await
+}
+
+#[tauri::command]
+async fn apply_patch(path: String, old_content: String, new_content: String, state: tauri::State<'_, AppState>) -> Result<(), String> {
+    apply_patch_internal(&path, &old_content, &new_content, &state).await
 }
 
 #[tauri::command]
@@ -449,34 +529,62 @@ CRITICAL: If the user has provided 'ADDITIONAL CONTEXT FROM USER' below, you MUS
         };
         (prompt.to_string(), msg)
     } else if story.status == "To Do" {
-        let prompt = "You are Sandman, a senior software architect. Analyze this story and provide a high-level implementation strategy. Identify key files to modify and the overall architecture.";
-        let msg = format!("Story Title: {}\nDescription: {}", story.title, story.description.as_deref().unwrap_or(""));
+        let prompt = "You are Sandman Architect. Analyze the story and generate a formal implementation plan.
+
+AVAILABLE TOOLS:
+- <tool:create_task>title</tool> (use this to create a checklist on the story board)
+- <tool:write_file>path | content</tool>
+
+YOU MUST:
+1. Generate the granular tasks for the Builder and register them using <tool:create_task>.
+2. Use <tool:write_file> to create 'docs/{ID}_PLAN.md' with the high-level architecture and task breakdown.
+3. Only after creating the plan, confirm that the story is ready for implementation.
+
+STORY: {TITLE}
+DESCRIPTION: {DESC}";
+        let msg = prompt
+            .replace("{ID}", &story.id)
+            .replace("{TITLE}", &story.title)
+            .replace("{DESC}", story.description.as_deref().unwrap_or(""));
         (prompt.to_string(), msg)
     } else if story.status == "In Progress" {
-        let prompt = "You are Sandman Builder, a technology-agnostic engineering agent. 
-You can implement any application (Web, Mobile, System, AI, etc.) by discovering the project's tech stack first.
+        let prompt = "You are Sandman Builder, a tech-agnostic autonomous engineer. 
+Follow the 'Antigravity Plan-Act-Verify' workflow.
 
 AVAILABLE TOOLS:
 - <tool:read_file>path</tool>
 - <tool:write_file>path | content</tool>
-- <tool:run_command>command args</tool> (use this to build/test or install deps)
-- <tool:search_code>keyword</tool> (use this to find relevant files and understand existing code)
+- <tool:apply_patch>path | old | new</tool>
+- <tool:run_command>command args</tool>
+- <tool:search_code>keyword</tool>
+- <tool:update_task>task_id | completed_bool</tool>
 
-STRATEGY:
-1. Scan for config files (package.json, go.mod, etc.) to understand the environment.
-2. Develop the implementation plan.
-3. Write the code and verify it.
+YOU MUST:
+1. Read 'docs/{ID}_PLAN.md' using <tool:read_file> to understand the mission.
+2. Implement the changes using <tool:write_file> and <tool:apply_patch>.
+3. After every major change, run a build/test command using <tool:run_command> to verify stability.
+4. Use <tool:update_task> to check off tasks as you complete them. (Pass 'true' for completed_bool)
+5. When all tasks in the plan are complete, summarize the implementation.
 
-STORY: {TITLE}\nDESCRIPTION: {DESC}";
+STORY: {TITLE}
+DESCRIPTION: {DESC}";
         let msg = prompt
+            .replace("{ID}", &story.id)
             .replace("{TITLE}", &story.title)
             .replace("{DESC}", story.description.as_deref().unwrap_or(""));
         (prompt.to_string(), msg)
     } else if story.status == "Review" {
-        let prompt = "You are Sandman Reviewer. Analyze the code changes using <tool:read_file> or <tool:search_code> to verify quality and correctness for the target technology stack.
-Story Title: {TITLE}
-Description: {DESC}";
+        let prompt = "You are Sandman Reviewer. Your role is a Quality Gatekeeper.
+YOU MUST:
+1. READ the code changes and the planning artifact in docs/ to verify alignment.
+2. RUN a verification command (e.g., 'npm test', 'cargo check', or a build command) using <tool:run_command>.
+3. Only if the verification command succeeds and the code is perfect, confirm that the story is 'DONE'.
+4. IF VERIFICATION FAILS: You must explicitly report the error log and state that the story requires more work.
+
+STORY: {TITLE}
+DESCRIPTION: {DESC}";
         let msg = prompt
+            .replace("{ID}", &story.id)
             .replace("{TITLE}", &story.title)
             .replace("{DESC}", story.description.as_deref().unwrap_or(""));
         (prompt.to_string(), msg)
@@ -502,13 +610,15 @@ Description: {DESC}";
     tauri::async_runtime::spawn(async move {
         // Recover state inside the spawned task to avoid lifetime issues
         let state = app_clone.state::<AppState>();
-        
+        let config = load_config(&app_clone);
+        let preferred_provider = config.column_strategies.get(&story.status).map(|s| s.as_str());
+
         let mut loop_count = 0;
         let max_loops = 10;
         let mut final_response = String::new();
 
         while loop_count < max_loops {
-            match call_llm(&app_clone, conversation.clone()).await {
+            match call_llm(&app_clone, conversation.clone(), preferred_provider).await {
                 Ok(response) => {
                     final_response = response.clone();
                     
@@ -526,6 +636,15 @@ Description: {DESC}";
                                     Err("Format error: use 'path | content'".to_string())
                                 }
                             },
+                            "apply_patch" => {
+                                let parts: Vec<&str> = args.splitn(3, '|').collect();
+                                if parts.len() == 3 {
+                                    apply_patch_internal(parts[0].trim(), parts[1].trim(), parts[2].trim(), &state).await
+                                        .map(|_| "Success: File patched".to_string())
+                                } else {
+                                    Err("Format error: use 'path | old_content | new_content'".to_string())
+                                }
+                            },
                             "run_command" => {
                                 let parts: Vec<&str> = args.split_whitespace().collect();
                                 if !parts.is_empty() {
@@ -535,6 +654,35 @@ Description: {DESC}";
                                 }
                             },
                             "search_code" => search_code_internal(args.trim(), &state).await,
+                            "create_task" => {
+                                sqlx::query("INSERT INTO story_tasks (story_id, title) VALUES (?, ?)")
+                                    .bind(&id_clone)
+                                    .bind(args.trim())
+                                    .execute(&pool_clone)
+                                    .await
+                                    .map(|_| "Task created".to_string())
+                                    .map_err(|e| e.to_string())
+                            },
+                            "update_task" => {
+                                let parts: Vec<&str> = args.splitn(2, '|').collect();
+                                if parts.len() == 2 {
+                                    match parts[0].trim().parse::<i64>() {
+                                        Ok(task_id) => {
+                                            let comp = parts[1].trim() == "true";
+                                            sqlx::query("UPDATE story_tasks SET completed = ? WHERE id = ?")
+                                                .bind(if comp { 1i64 } else { 0i64 })
+                                                .bind(task_id)
+                                                .execute(&pool_clone)
+                                                .await
+                                                .map(|_| "Task updated".to_string())
+                                                .map_err(|e| e.to_string())
+                                        },
+                                        Err(e) => Err(e.to_string()),
+                                    }
+                                } else {
+                                    Err("Format error: use 'id | completed_bool'".to_string())
+                                }
+                            },
                             _ => Err("Unknown tool".to_string()),
                         };
 
@@ -583,7 +731,25 @@ Description: {DESC}";
         } else if story.status == "In Progress" {
             let _ = sqlx::query("UPDATE stories SET status = 'Review', agent = 'Reviewer', state = 'success' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
         } else if story.status == "Review" {
-            let _ = sqlx::query("UPDATE stories SET status = 'Done', agent = NULL, state = 'success' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
+            // Check if Reviewer reported failure
+            let is_failure = response.to_lowercase().contains("verification failed") || 
+                            response.to_lowercase().contains("error log") ||
+                            response.to_lowercase().contains("requires more work");
+
+            if is_failure {
+                let _ = app_clone.emit("log", "\x1b[31m[Reviewer]\x1b[0m Verification failed. Returning to Builder for corrections.");
+                let _ = sqlx::query("UPDATE stories SET status = 'In Progress', agent = 'Builder', state = 'idle', description = ? WHERE id = ?")
+                    .bind(&response)
+                    .bind(&id_clone)
+                    .execute(&pool_clone)
+                    .await;
+            } else {
+                let _ = app_clone.emit("log", "\x1b[32m[Reviewer]\x1b[0m Verification successful. Moving to DONE.");
+                let _ = sqlx::query("UPDATE stories SET status = 'Done', agent = NULL, state = 'success' WHERE id = ?")
+                    .bind(&id_clone)
+                    .execute(&pool_clone)
+                    .await;
+            }
         } else {
             let _ = sqlx::query("UPDATE stories SET state = 'success' WHERE id = ?").bind(&id_clone).execute(&pool_clone).await;
         }
@@ -635,6 +801,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             switch_project,
             get_stories,
+            get_story_tasks,
+            create_story_task,
+            update_story_task,
             create_story,
             update_story_status,
             delete_story,
@@ -642,8 +811,10 @@ pub fn run() {
             list_files,
             read_file,
             write_file,
+            apply_patch,
             run_project_command,
             search_code,
+            set_column_strategy,
             get_config,
             save_global_config,
             update_provider,

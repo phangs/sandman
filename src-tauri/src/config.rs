@@ -4,10 +4,14 @@ use std::path::PathBuf;
 use tauri::AppHandle;
 use tauri::Manager;
 
+use std::collections::HashMap;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     pub providers: Vec<ProviderConfig>,
     pub selected_model_group: String,
+    #[serde(default)]
+    pub column_strategies: HashMap<String, String>, // story status -> provider id
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -22,8 +26,16 @@ pub struct ProviderConfig {
 
 impl Default for Config {
     fn default() -> Self {
+        let mut column_strategies = HashMap::new();
+        column_strategies.insert("Raw Requirements".to_string(), "ollama".to_string());
+        column_strategies.insert("Clarification Required".to_string(), "ollama".to_string());
+        column_strategies.insert("To Do".to_string(), "ollama".to_string());
+        column_strategies.insert("In Progress".to_string(), "ollama".to_string());
+        column_strategies.insert("Review".to_string(), "ollama".to_string());
+
         Self {
             selected_model_group: "Local & Efficient".to_string(),
+            column_strategies,
             providers: vec![
                 ProviderConfig {
                     id: "ollama".to_string(),

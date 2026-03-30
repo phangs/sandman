@@ -8,13 +8,18 @@ pub struct Message {
     pub content: String,
 }
 
-pub async fn call_llm(app: &AppHandle, messages: Vec<Message>) -> Result<String, String> {
+pub async fn call_llm(app: &AppHandle, messages: Vec<Message>, preferred_provider_id: Option<&str>) -> Result<String, String> {
     let config = load_config(app);
     
-    // Find first active provider
-    let provider = config.providers.iter()
-        .find(|p| p.active)
-        .ok_or("No active LLM provider found in settings")?;
+    // 1. Try to find the preferred provider if specified
+    // 2. Fall back to first active provider
+    let provider = if let Some(pid) = preferred_provider_id {
+        config.providers.iter().find(|p| p.id == pid)
+            .ok_or(format!("Preferred provider '{}' not found in settings", pid))?
+    } else {
+        config.providers.iter().find(|p| p.active)
+            .ok_or("No active LLM provider found in settings")?
+    };
 
     match provider.id.as_str() {
         "ollama" => call_ollama(provider, messages).await,

@@ -34,9 +34,54 @@ export function KanbanBoard() {
         .map(l => l.trim())
     : [];
 
+  const [config, setConfig] = useState<any>(null);
+  const [storyTasks, setStoryTasks] = useState<Record<string, any[]>>({});
+
+  const loadConfig = async () => {
+    try {
+      const c = await invoke('get_config');
+      setConfig(c);
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const fetchStoryTasks = async (ids: string[]) => {
+    const results: Record<string, any[]> = {};
+    await Promise.all(
+      ids.map(async (id) => {
+        try {
+          const tasks = await invoke<any[]>('get_story_tasks', { storyId: id });
+          results[id] = tasks;
+        } catch { results[id] = []; }
+      })
+    );
+    setStoryTasks(prev => ({ ...prev, ...results }));
+  };
+
+  const handleSetColumnStrategy = async (status: StoryStatus, providerId: string) => {
+    try {
+      await invoke('set_column_strategy', { status, providerId });
+      loadConfig();
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
   useEffect(() => {
+    loadConfig();
     fetchStories();
+    const storyInterval = setInterval(fetchStories, 3000);
+    return () => clearInterval(storyInterval);
   }, []);
+
+  // Poll tasks for all stories in active SDLC stages
+  useEffect(() => {
+    const activeIds = stories
+      .filter(s => ['To Do', 'In Progress', 'Review'].includes(s.status))
+      .map(s => s.id);
+    if (activeIds.length > 0) fetchStoryTasks(activeIds);
+  }, [stories]);
 
   const fetchStories = async () => {
     try {
@@ -205,23 +250,43 @@ export function KanbanBoard() {
             onDrop={(e) => handleDrop(e, col)}
           >
             {/* Column Header */}
-            <div className="p-3 border-b border-border flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-xs uppercase font-semibold text-text-muted tracking-wider">{col}</span>
-                <span className="text-xs text-text-muted bg-background px-2 py-0.5 rounded-full">{colStories.length}</span>
+            <div className="p-3 border-b border-border flex flex-col gap-2">
+              <div className="flex items-center justify-between w-full">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] uppercase font-bold text-text-muted tracking-wide truncate max-w-[120px]">{col}</span>
+                  <span className="text-[10px] text-text-muted bg-background px-1.5 py-0.5 rounded-full font-mono">{colStories.length}</span>
+                </div>
+                
+                <div className="flex items-center gap-1.5">
+                  <button 
+                    onClick={() => toggleAIForColumn(col)}
+                    className={`p-1.5 rounded-md transition-all ${
+                      activeAIColumns.has(col) 
+                        ? 'text-green-500 bg-green-500/5 hover:bg-green-500/10' 
+                        : 'text-text-muted hover:bg-white/5'
+                    }`}
+                    title={activeAIColumns.has(col) ? "AI Processing Active" : "AI Processing Paused"}
+                  >
+                    {activeAIColumns.has(col) ? <Play size={12} fill="currentColor" className="animate-pulse-slow" /> : <div className="w-3 h-3 border-2 border-text-muted rounded-[2px]" />}
+                  </button>
+                </div>
               </div>
-              
-              <button 
-                onClick={() => toggleAIForColumn(col)}
-                className={`p-1 rounded transition-colors ${
-                  activeAIColumns.has(col) 
-                    ? 'text-green-500 hover:bg-green-500/10' 
-                    : 'text-text-muted hover:bg-white/5'
-                }`}
-                title={activeAIColumns.has(col) ? "AI Processing Active" : "AI Processing Paused"}
-              >
-                {activeAIColumns.has(col) ? <Play size={14} fill="currentColor" /> : <div className="w-3.5 h-3.5 bg-text-muted rounded-[2px]" />}
-              </button>
+
+              {/* Model Strategy Selector */}
+              {col !== 'Done' && col !== 'Backlog' && (
+                <div className="flex items-center gap-2">
+                  <span className="text-[9px] text-text-muted uppercase font-semibold">Brain:</span>
+                  <select 
+                    value={config?.column_strategies?.[col] || (config?.providers?.find((p: any) => p.active)?.id || '')}
+                    onChange={(e) => handleSetColumnStrategy(col, e.target.value)}
+                    className="flex-1 bg-background border border-border text-[10px] py-0.5 px-1 rounded-sm text-text-muted focus:outline-none focus:border-primary/50 cursor-pointer appearance-none hover:text-text transition-colors"
+                  >
+                    {config?.providers?.map((p: any) => (
+                      <option key={p.id} value={p.id}>{p.name}</option>
+                    ))}
+                  </select>
+                </div>
+              )}
             </div>
 
             {/* Column Body */}
@@ -310,10 +375,46 @@ export function KanbanBoard() {
 
                   <p className="text-sm text-text leading-snug mb-2 pointer-events-none">{story.title}</p>
                   {story.description && (
-                    <div className="text-[10px] text-text-muted line-clamp-3 mb-3 bg-surface/50 p-1.5 rounded border border-border/50">
-                      {story.description.replace(/# Title:.*?\n/, "").trim()}
+                    <div className="text-[10px] text-text-muted line-clamp-3 mb-2 bg-surface/50 p-1.5 rounded border border-border/50">
+                      {story.description.replace(/# Title:.*?\n/, '').trim()}
                     </div>
                   )}
+
+                  {/* AI Task Progress */}
+                  {storyTasks[story.id] && storyTasks[story.id].length > 0 && (() => {
+                    const tasks = storyTasks[story.id];
+                    const done = tasks.filter(t => t.completed).length;
+                    const total = tasks.length;
+                    const pct = Math.round((done / total) * 100);
+                    return (
+                      <div className="mb-2" onClick={e => e.stopPropagation()}>
+                        <div className="flex items-center justify-between text-[9px] text-text-muted mb-1">
+                          <span className="font-semibold uppercase tracking-wide">Progress</span>
+                          <span className="font-mono">{done}/{total}</span>
+                        </div>
+                        <div className="h-1 bg-surface rounded-full overflow-hidden">
+                          <div
+                            className="h-full bg-gradient-to-r from-blue-500 to-primary transition-all duration-500"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        {tasks.length <= 5 && (
+                          <ul className="mt-1.5 space-y-0.5">
+                            {tasks.map((t: any) => (
+                              <li key={t.id} className="flex items-start gap-1.5 text-[9px] text-text-muted">
+                                <span className={`mt-px flex-shrink-0 w-2.5 h-2.5 rounded-sm border flex items-center justify-center ${
+                                  t.completed ? 'bg-green-500/20 border-green-500/50' : 'border-border'
+                                }`}>
+                                  {t.completed && <CheckCircle size={7} className="text-green-400" />}
+                                </span>
+                                <span className={t.completed ? 'line-through opacity-50' : ''}>{t.title}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    );
+                  })()}
 
                   <div className="flex items-center justify-between text-xs text-text-muted">
                     {/* Agent Status Icon */}
