@@ -31,8 +31,13 @@ Instead of writing code yourself, you define requirements in a Kanban board. San
 
 You need the standard [Tauri Prerequisites](https://tauri.app/v1/guides/getting-started/prerequisites) installed on your machine:
 - Node.js (v18+)
-- Rust (`rustup`, `cargo`)
 - OS-specific build tools (`build-essential`, `libgtk-3-dev`, `libwebkit2gtk-4.0-dev` for Linux).
+
+**Install Rust:**
+Sandman requires the Rust toolchain. Install it via `rustup`:
+```bash
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+```
 
 ### Local Setup
 
