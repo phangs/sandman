@@ -55,11 +55,27 @@ impl Default for Config {
                 },
                 ProviderConfig {
                     id: "anthropic".to_string(),
-                    name: "Anthropic".to_string(),
+                    name: "Anthropic (Claude)".to_string(),
                     api_key: None,
                     endpoint: "https://api.anthropic.com/v1".to_string(),
                     active: false,
                     model: "claude-3-5-sonnet-latest".to_string(),
+                },
+                ProviderConfig {
+                    id: "gemini".to_string(),
+                    name: "Google Gemini".to_string(),
+                    api_key: None,
+                    endpoint: "https://generativelanguage.googleapis.com".to_string(),
+                    active: false,
+                    model: "gemini-1.5-flash".to_string(),
+                },
+                ProviderConfig {
+                    id: "xai".to_string(),
+                    name: "XAI Grok".to_string(),
+                    api_key: None,
+                    endpoint: "https://api.x.ai/v1".to_string(),
+                    active: false,
+                    model: "grok-beta".to_string(),
                 },
             ],
         }
@@ -92,7 +108,17 @@ pub fn load_config(app: &AppHandle) -> Config {
         Err(_) => return Config::default(),
     };
 
-    serde_json::from_str(&data).unwrap_or_else(|_| Config::default())
+    let mut config: Config = serde_json::from_str(&data).unwrap_or_else(|_| Config::default());
+    
+    // Merge new providers from default if missing
+    let default_config = Config::default();
+    for dp in default_config.providers {
+        if !config.providers.iter().any(|p| p.id == dp.id) {
+            config.providers.push(dp);
+        }
+    }
+
+    config
 }
 
 pub fn save_config(app: &AppHandle, config: &Config) -> Result<(), String> {

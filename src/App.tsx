@@ -106,7 +106,7 @@ function App() {
                 <Group orientation="vertical">
                   
                   {/* Editor View */}
-                  <Panel defaultSize={70} className="bg-background relative">
+                  <Panel defaultSize={50} className="bg-background relative">
                     {/* Tabs */}
                     <div className="h-9 flex bg-surface">
                       <div className="px-4 border-t border-t-primary border-r border-border bg-background flex items-center gap-2 cursor-pointer text-text text-sm">
@@ -144,7 +144,7 @@ function App() {
                   <Separator className="h-1 bg-border hover:bg-primary/50 transition-colors" />
                   
                   {/* Bottom Terminal Panel */}
-                  <Panel defaultSize={30} minSize={10} className="bg-background flex flex-col border-t border-border overflow-hidden">
+                  <Panel defaultSize={50} minSize={10} className="bg-background flex flex-col border-t border-border overflow-hidden">
                     <div className="flex-1 overflow-hidden flex items-stretch">
                       <TerminalPanel />
                     </div>

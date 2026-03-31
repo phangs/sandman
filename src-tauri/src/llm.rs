@@ -23,7 +23,9 @@ pub async fn call_llm(app: &AppHandle, messages: Vec<Message>, preferred_provide
 
     match provider.id.as_str() {
         "ollama" => call_ollama(provider, messages).await,
-        "openai" => call_openai(provider, messages).await,
+        "openai" | "xai" => call_openai(provider, messages).await, // Grok is OpenAI compatible
+        "gemini" | "google" => call_gemini(provider, messages).await,
+        "anthropic" => call_anthropic(provider, messages).await,
         _ => Err(format!("Provider {} not yet implemented", provider.id)),
     }
 }
@@ -90,4 +92,107 @@ async fn call_openai(provider: &ProviderConfig, messages: Vec<Message>) -> Resul
     json["choices"][0]["message"]["content"].as_str()
         .map(|s| s.to_string())
         .ok_or("Malformed response from OpenAI".to_string())
+}
+
+async fn call_gemini(provider: &ProviderConfig, messages: Vec<Message>) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let api_key = provider.api_key.as_ref().ok_or("Gemini API Key is missing")?;
+    
+    // Gemini endpoint format: models/{model}:generateContent
+    let model = if provider.model.is_empty() { "gemini-1.5-flash" } else { &provider.model };
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", model, api_key);
+
+    let mut system_instruction = String::new();
+    let mut merged_contents: Vec<serde_json::Value> = Vec::new();
+    let mut last_role = String::new();
+    let mut last_text = String::new();
+
+    for m in messages {
+        if m.role == "system" {
+            if !system_instruction.is_empty() {
+                system_instruction.push_str("\n\n");
+            }
+            system_instruction.push_str(&m.content);
+            continue;
+        }
+
+        let current_role = if m.role == "assistant" { "model" } else { "user" };
+        if current_role == last_role {
+            last_text.push_str("\n\n");
+            last_text.push_str(&m.content);
+        } else {
+            if !last_text.is_empty() {
+                merged_contents.push(serde_json::json!({
+                    "role": last_role,
+                    "parts": [{ "text": last_text }]
+                }));
+            }
+            last_role = current_role.to_string();
+            last_text = m.content.clone();
+        }
+    }
+    
+    if !last_text.is_empty() {
+        merged_contents.push(serde_json::json!({
+            "role": last_role,
+            "parts": [{ "text": last_text }]
+        }));
+    }
+
+    let mut body = serde_json::json!({ "contents": merged_contents });
+    
+    if !system_instruction.is_empty() {
+        body.as_object_mut().unwrap().insert(
+            "system_instruction".to_string(), 
+            serde_json::json!({ "parts": [{ "text": system_instruction }] })
+        );
+    }
+
+
+    let res = client.post(url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gemini request failed: {}", e))?;
+
+    let json: serde_json::Value = res.json().await.map_err(|e| format!("Failed to parse Gemini JSON: {}", e))?;
+    
+    // Explicitly check for an error object in the response
+    if let Some(error) = json.get("error") {
+        let msg = error.get("message").and_then(|m| m.as_str()).unwrap_or("Unknown Gemini Error");
+        let status = error.get("status").and_then(|s| s.as_str()).unwrap_or("UNKNOWN_STATUS");
+        return Err(format!("Gemini API Error ({}): {}", status, msg));
+    }
+
+    json["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .ok_or(format!("Malformed response from Gemini. Candidates missing content. Raw: {:?}", json))
+}
+
+async fn call_anthropic(provider: &ProviderConfig, messages: Vec<Message>) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let url = format!("{}/messages", provider.endpoint);
+    let api_key = provider.api_key.as_ref().ok_or("Anthropic API Key is missing")?;
+
+    let body = serde_json::json!({
+        "model": &provider.model,
+        "max_tokens": 4096,
+        "messages": messages,
+    });
+
+    let res = client.post(url)
+        .header("x-api-key", api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Anthropic request failed: {}", e))?;
+
+    let json: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
+    
+    json["content"][0]["text"].as_str()
+        .map(|s| s.to_string())
+        .ok_or(format!("Malformed response from Anthropic. Raw: {:?}", json))
 }

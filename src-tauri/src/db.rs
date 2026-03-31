@@ -72,10 +72,52 @@ pub async fn init_db(project_path: &str) -> Result<SqlitePool, String> {
         FOREIGN KEY(story_id) REFERENCES stories(id) ON DELETE CASCADE
     )").execute(&pool).await;
 
+    // RAG: Semantic chunk store with raw embedding BLOBs (no sqlite-vec extension needed)
+    let _ = sqlx::query("CREATE TABLE IF NOT EXISTS rag_chunks (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        file_path TEXT NOT NULL,
+        start_line INTEGER NOT NULL,
+        end_line INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        embedding BLOB NOT NULL
+    )").execute(&pool).await;
+    let _ = sqlx::query("CREATE INDEX IF NOT EXISTS idx_rag_chunks_file ON rag_chunks(file_path)").execute(&pool).await;
+
+    let _ = sqlx::query("CREATE TABLE IF NOT EXISTS chat_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+    )").execute(&pool).await;
+
+    let _ = sqlx::query("CREATE TABLE IF NOT EXISTS chat_messages (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER NOT NULL,
+        role TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES chat_sessions(id) ON DELETE CASCADE
+    )").execute(&pool).await;
+
     // 2. Vector table (Requires sqlite-vec extension)
     // We attempt this separately so the app doesn't crash if the extension isn't loaded
     let vec_schema = "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(chunk_id INTEGER PRIMARY KEY, embedding FLOAT[1536]);";
     let _ = sqlx::query(vec_schema).execute(&pool).await;
+
+    // AI Artifacts (Temporary/Draft scratchpads)
+    let _ = sqlx::query("CREATE TABLE IF NOT EXISTS artifacts (
+        id TEXT PRIMARY KEY,
+        story_id TEXT NOT NULL,
+        name TEXT NOT NULL,
+        content TEXT NOT NULL,
+        type TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        saved INTEGER DEFAULT 0,
+        FOREIGN KEY(story_id) REFERENCES stories(id) ON DELETE CASCADE
+    )").execute(&pool).await;
+
+    // Failsafe cleanup: If sandman restarted, any previously processing agents are dead. Reset to idle.
+    let _ = sqlx::query("UPDATE stories SET state = 'idle', ai_ready = 0, ai_hold = 1 WHERE state = 'processing'").execute(&pool).await;
 
     Ok(pool)
 }
